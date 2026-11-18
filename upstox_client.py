@@ -257,6 +257,19 @@ class UpstoxClient:
         except Exception as e:
             return None, str(e)
 
+    # ---------------------------------------------------------- today's trades (fills)
+    def fetch_trades_for_day(self):
+        """Today's executed trades in this Upstox account. Returns (list, None) or (None, error).
+        Each trade has instrument_token, transaction_type (BUY/SELL), quantity (units), average_price, ..."""
+        url = f"{BASE_V2}/order/trades/get-trades-for-day"
+        try:
+            resp = requests.get(url, headers=self.headers, timeout=10)
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+            return resp.json().get("data") or [], None
+        except Exception as e:
+            return None, str(e)
+
 
 def test_connection(access_token: str):
     """Quick sanity check the token works — hits the user profile endpoint."""

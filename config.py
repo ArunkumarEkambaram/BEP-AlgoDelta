@@ -10,14 +10,17 @@ NIFTY_OPTION_UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
 # Indices the BEP Support monitor can watch (NIFTY only). To bring SENSEX back, add:
 #   "SENSEX": {"index_key": "BSE_INDEX|SENSEX", "underlying_key": "BSE_INDEX|SENSEX",
-#              "strike_interval": 100, "enabled": False},
+#              "strike_interval": 100, "enabled": False, "lot_size": 20},
 INDEXES = {
     "NIFTY":  {"index_key": "NSE_INDEX|Nifty 50", "underlying_key": "NSE_INDEX|Nifty 50",
-               "strike_interval": 50,  "enabled": True},
+               "strike_interval": 50,  "enabled": True, "lot_size": 65},
 }
 
 STRIKE_INTERVAL = 50        
 STRIKES_EACH_SIDE = 2       # nearest strike +/- 2 -> 5 strikes total
+
+# Upstox trade book refresh for the AlgoDelta orders table (Entry / Exit of SENT orders).
+TRADES_REFRESH_SECONDS = 30
 
 # Live scan interval (seconds).
 SCAN_INTERVAL_SECONDS = 10

@@ -11,6 +11,7 @@ import config
 import upstox_client
 import notifier
 import order_bridge
+import trade_tracker
 import market_utils
 import export_utils
 import bep
@@ -37,12 +38,20 @@ ORDER_COLUMNS = [
     {"name": "strike", "label": "Strike", "field": "strike", "align": "left"},
     {"name": "kind", "label": "Order", "field": "kind", "align": "left"},
     {"name": "bep", "label": "BEP", "field": "bep", "align": "left"},
-    {"name": "ltp", "label": "LTP", "field": "ltp", "align": "left"},
+    {"name": "ltp", "label": "Signal LTP", "field": "ltp", "align": "left"},
+    {"name": "entry", "label": "Entry", "field": "entry", "align": "left"},
+    {"name": "exit", "label": "Exit", "field": "exit", "align": "left"},
+    {"name": "ltp_live", "label": "LTP", "field": "ltp_live", "align": "left"},
+    {"name": "points", "label": "Captured Points", "field": "points", "align": "left"},
+    {"name": "pnl", "label": "P&L \u20b9", "field": "pnl", "align": "left"},
     {"name": "status", "label": "Status", "field": "status", "align": "left"},
     {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
-    {"name": "payload", "label": "JSON", "field": "payload", "align": "left"},
 ]
-ORDER_EXPORT_COLUMNS = [(c["name"], c["label"]) for c in ORDER_COLUMNS]
+# Downloads keep the JSON that was sent; the on-screen table does not show it.
+ORDER_EXPORT_COLUMNS = [(c["name"], c["label"]) for c in ORDER_COLUMNS] + [("payload", "JSON")]
+# Columns saved in today's orders_YYYY-MM-DD.csv (live columns are recalculated, not saved).
+ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
+                      "expiry", "qty"]
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 
 BEP_EXPORT_COLUMNS = [
@@ -81,9 +90,14 @@ def _orders_file() -> str:
 def _load_orders_today() -> list:
     try:
         with open(_orders_file(), newline="", encoding="utf-8") as f:
-            return [dict(r) for r in csv.DictReader(f)]
+            rows = [dict(r) for r in csv.DictReader(f)]
     except OSError:
         return []
+    for r in rows:                                    # live columns are recalculated after start
+        for k in ("entry", "exit", "points", "pnl"):
+            r.setdefault(k, "--")
+        r.setdefault("ltp_live", "")
+    return rows
 
 
 order_log = _load_orders_today()
@@ -109,11 +123,15 @@ def _save_order_row(row: dict):
     try:
         path = _orders_file()
         new = not os.path.exists(path)
+        fields = ORDER_FILE_COLUMNS
+        if not new:                                   # keep the header the file was started with
+            with open(path, newline="", encoding="utf-8") as f:
+                fields = next(csv.reader(f), None) or ORDER_FILE_COLUMNS
         with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=[c["name"] for c in ORDER_COLUMNS])
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new:
                 w.writeheader()
-            w.writerow({k: row.get(k, "") for k in [c["name"] for c in ORDER_COLUMNS]})
+            w.writerow({k: row.get(k, "") for k in fields})
     except OSError:
         pass
 
@@ -341,7 +359,7 @@ def main_page():
     with ui.row().classes("items-center gap-6"):
         status_label = ui.label("Status: waiting for valid token")
         ui.button("Download BEP Support XLSX", icon="download", on_click=download_bep_xlsx).props("dense")
-    polling = {"busy": False}
+    polling = {"busy": False, "trades_at": 0.0}
     ui.label("BEP Support Boards: Green = a green candle touched BEP (low <= BEP) and closed above it. "
              "Red = one of the next 3 candles (15 min) closed below the fail level (the flush candle's low if a failed-breakdown "
              "setup stood behind it, otherwise the trigger candle's own low); after that the row stays green. "
@@ -621,8 +639,9 @@ def main_page():
         <q-td key="status" :props="props">
             <q-badge :color="props.value === 'SENT' ? 'green' : props.value === 'DRY RUN' ? 'blue' : props.value === 'FAILED' ? 'red' : 'orange'">{{ props.value }}</q-badge>
         </q-td>''')
-    orders_table.add_slot("body-cell-payload", '''
-        <q-td key="payload" :props="props" style="max-width: 420px; white-space: normal; word-break: break-all; font-family: monospace; font-size: 11px">{{ props.value }}</q-td>''')
+    for _col in ("points", "pnl"):                    # green when >= 0, red when < 0
+        orders_table.add_slot(f"body-cell-{_col}", f'''
+        <q-td key="{_col}" :props="props" :class="typeof props.value === 'number' ? (props.value >= 0 ? 'text-green-8 text-weight-bold' : 'text-red-8 text-weight-bold') : ''">{{{{ props.value }}}}</q-td>''')
     orders_table.add_slot("body-cell-detail", '''
         <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
 
@@ -633,6 +652,8 @@ def main_page():
             "ltp": round(float(sig["ltp"]), 2),
             "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
             "payload": json.dumps(res["payload"]),
+            "expiry": sig.get("expiry") or "", "qty": config.AUTO_ORDER[sig["index"]]["qty"],
+            "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
         }
         order_log.append(row)
         _save_order_row(row)
@@ -706,8 +727,35 @@ def main_page():
                     p["render_locks"]()
                 except Exception as ex:
                     log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
+            await refresh_order_tracking()
         finally:
             polling["busy"] = False
+
+    async def refresh_order_tracking():
+        """Entry / Exit / LTP / Captured Points / P&L for SENT and DRY RUN rows in the orders table."""
+        if not any(r.get("status") in trade_tracker.TRACKED for r in order_log):
+            return
+        trades, t_err = None, None
+        now_ts = datetime.now().timestamp()
+        has_sent = any(r.get("status") == "SENT" for r in order_log)
+        if has_sent and now_ts - polling["trades_at"] >= config.TRADES_REFRESH_SECONDS:
+            trades, t_err = await run.io_bound(client.fetch_trades_for_day)
+            polling["trades_at"] = now_ts
+            if trades is None:
+                log(f"[{datetime.now().strftime('%H:%M:%S')}] Upstox trade book unavailable ({t_err}); Entry/Exit not updated.")
+        expiries = {n: monitors[n].expiry for n in monitors}
+        try:
+            updates, err = await run.io_bound(trade_tracker.compute, client, order_log, expiries, trades)
+        except Exception as ex:
+            log(f"[{datetime.now().strftime('%H:%M:%S')}] Order tracking error: {ex}")
+            return
+        if not updates:
+            return
+        for r in order_log:
+            if r["id"] in updates:
+                r.update(updates[r["id"]])
+        orders_table.rows = list(reversed(order_log))
+        orders_table.update()
 
     scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
 
