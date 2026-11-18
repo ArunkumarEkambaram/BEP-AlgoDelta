@@ -333,14 +333,37 @@ def support_page():
 
 
 # ====================================================================== Order Management (common price + stars)
+def target_cell(name, r):
+    """Row's own target (type + value); saved on Enter / leaving the box; locked once ordered."""
+    locked = r.get("order_status") in ("SENT", "DRY RUN", "sending")
+    t_type, t_val = engine.row_target(name, r)
+    with ui.row().classes("gap-1 no-wrap items-center"):
+        sel = ui.select(["POINT", "LTP"], value=t_type).props("dense options-dense").classes("w-24")
+        num = ui.number(value=t_val, min=0, step=1).props("dense").classes("w-20")
+
+        def commit(_=None, sel=sel, num=num, rid=r["id"]):
+            if num.value is None or float(num.value) <= 0:
+                ui.notify("Target must be above 0.", type="negative")
+                return
+            if engine.set_watch_target(name, rid, sel.value, float(num.value)):
+                ui.notify(f"Target {float(num.value):g} ({sel.value}) saved for this row.", type="positive")
+        sel.on_value_change(commit)
+        num.on("blur", commit)
+        num.on("keydown.enter", commit)
+        if locked:
+            sel.disable()
+            num.disable()
+            sel.tooltip("Locked: this is the target that was sent with the order")
+
+
 def section(title, icon, rows, empty_text, place, name):
     """One block of Order Management rows (Common Price or BEP Support \u2b50)."""
     card_title(title, icon)
     if not rows:
         ui.label(empty_text).classes("text-sm opacity-70")
         return
-    with ui.grid(columns="90px 80px 50px 100px 60px 140px 1fr 230px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", ""):
+    with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 190px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
@@ -350,6 +373,7 @@ def section(title, icon, rows, empty_text, place, name):
                      CommonWatch.status_text(r)]
             for txt in cells:
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            target_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
                 b = ui.button(f"Ordered ({r['order_status']})" if done else "Place order",
@@ -365,8 +389,8 @@ def pair_section(rows, place, name):
     if not rows:
         ui.label("No pairs yet - choose 'Pair (CE vs PE)' above.").classes("text-sm opacity-70")
         return
-    with ui.grid(columns="260px 70px 60px 190px 1fr 230px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", ""):
+    with ui.grid(columns="240px 60px 60px 170px 1fr 190px 220px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2",
@@ -375,6 +399,7 @@ def pair_section(rows, place, name):
             closes = " \u00b7 ".join(f"{v:.2f}" if v is not None else "--" for v in lc)
             for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}", f"{r['tf']} min", closes, CommonWatch.status_text(r)):
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            target_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
                 text = f"Ordered {r['opt']} ({r['order_status']})" if done else \
@@ -634,6 +659,12 @@ def algodelta_card(name):
                     ad_sl_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("sl_type", "POINT"), label="Stop loss type").classes("flex-1")
                     ad_sl = ui.number("Stop loss value", value=ad_cfg["sl"], min=0, step=1).classes("flex-1")
             with ui.column().classes("flex-1 min-w-[320px] gap-2"):
+                ui.label("Default target for new Order Management rows (each row can be changed until ordered; "
+                         "type follows Target type; the 09:15 order uses Target value)").classes("text-xs opacity-70")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    ad_tgt_same = ui.number("Same strike", value=ad_cfg.get("tgt_same", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_pair = ui.number("Pair", value=ad_cfg.get("tgt_pair", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_star = ui.number("BEP Support \u2b50", value=ad_cfg.get("tgt_star", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
                 ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
                                          value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
                 ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
@@ -702,6 +733,10 @@ def algodelta_card(name):
             return None, "Target and SL must be numbers above 0."
         if qty is None or qty < 1 or qty != int(qty):
             return None, "Quantity must be a whole number of at least 1."
+        defaults = {k: num(w.value) for k, w in (("tgt_same", ad_tgt_same), ("tgt_pair", ad_tgt_pair),
+                                                     ("tgt_star", ad_tgt_star))}
+        if any(v is None or v <= 0 for v in defaults.values()):
+            return None, "Default targets (Same strike / Pair / BEP Support) must be numbers above 0."
         max_above = num(ad_max_above.value)
         if max_above is None or max_above <= 0:
             return None, "Max points above BEP must be a number above 0."
@@ -713,7 +748,7 @@ def algodelta_card(name):
             if t_gap > t_trig:
                 return None, "Gap must not be larger than Trigger (Gap = Trigger moves the SL to cost at the trigger)."
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
-                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above,
+                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -736,7 +771,8 @@ def algodelta_card(name):
         update_tag()
         trail_txt = (f"trail ON ({nums['trail_type']}: trigger {nums['trail_trigger']}, point {nums['trail_point']}, "
                      f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
-        ad_status.set_text(f"✅ {saved} Target {nums['tgt']} ({nums['tgt_type']}), SL {nums['sl']} ({nums['sl_type']}), "
+        ad_status.set_text(f"✅ {saved} Target {nums['tgt']} ({nums['tgt_type']}; rows: same {nums['tgt_same']:g}, "
+                           f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}), SL {nums['sl']} ({nums['sl_type']}), "
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
                            f"09:15 order only if LTP is < {nums['max_above_bep']} above BEP; "
                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "

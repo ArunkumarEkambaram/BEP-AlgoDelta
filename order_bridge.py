@@ -100,7 +100,7 @@ def send_order(sig: dict) -> dict:
     order_type = sig.get("order_type", "strategy_order")
     cfg = config.AUTO_ORDER[sig["index"]]
     template = cfg["templates"].get(order_type) or {"type": order_type}
-    payload = build_payload(sig)
+    payload = build_payload(sig, None, sig.get("params"))
     text = json.dumps(payload)
     head = _describe(sig)
 
