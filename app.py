@@ -628,4 +628,4 @@ def main_page():
     scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
 
 
-ui.run(title="BEP Support Monitor", port=8082, reload=False)
+ui.run(title="BEP Support Monitor", port=8083, reload=False)
