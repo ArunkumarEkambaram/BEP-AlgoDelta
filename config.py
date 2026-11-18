@@ -52,15 +52,17 @@ AUTO_ORDER_PAUSED = False         # "Pause algo trade" button.
 AUTO_ORDER_DAILY_LIMIT = 20       # "Max orders/day" box: hard cap on LIVE orders per day.
 
 # Per-index AlgoDelta settings. 
-# "tgt_type" and "sl_type" can be "POINT" or "LTP".
+# "tgt_type", "sl_type" and "trail_type" can be "POINT" or "LTP".
+# The UI controls always decide exit_on_opposite, is_trail_set and the trail_* values
+# (order_bridge.build_payload writes them over whatever the JSON template holds).
 import copy as _copy
 
 _STRATEGY_ORDER = {
     "type": "strategy_order",
-    "exit_on_opposite": True,
+    "exit_on_opposite": "{exit_on_opposite}",
     "is_tgt": True,
     "is_sl": True,
-    "is_trail_set": False,
+    "is_trail_set": "{is_trail}",
     "position_size": "{{strategy.position_size}}",
     "transaction_type": "BUY",
     "script_type": "{opt}",
@@ -70,6 +72,10 @@ _STRATEGY_ORDER = {
     "product": "INTRADAY",
     "quantity": "{qty}",
     "signal_type": "{signal}",
+    "trail_type": "{trail_type}",
+    "trail_trigger": "{trail_trigger}",
+    "trail_gap": "{trail_gap}",
+    "trail_point": "{trail_point}",
     "tgt_type": "{tgt_type}",
     "tgt_value": "{tgt}",
     "sl_type": "{sl_type}",
@@ -80,6 +86,8 @@ def _default_auto_order() -> dict:
     return {
         "webhook_url": "", "confirmed": False,
         "tgt": 50, "sl": 10, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
+        "exit_on_opposite": False,
+        "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 20,
         "templates": {"strategy_order": _copy.deepcopy(_STRATEGY_ORDER)},
     }
 

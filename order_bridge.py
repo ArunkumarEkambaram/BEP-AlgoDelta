@@ -12,7 +12,8 @@ import config
 _today = {"date": None, "count": 0}
 
 _PLACEHOLDER = re.compile(r"(?<!\{)\{(\w+)\}(?!\})")
-_NUMERIC = ("qty", "strike", "tgt", "sl")
+# Placeholders that fill a whole JSON value keep their real type (number / true / false), not a string.
+_NUMERIC = ("qty", "strike", "tgt", "sl", "trail_trigger", "trail_gap", "trail_point", "is_trail", "exit_on_opposite")
 
 
 def _fill(value, ctx):
@@ -49,8 +50,11 @@ def build_payload(sig: dict, template: dict = None, params: dict = None) -> dict
     if template is None:
         template = cfg["templates"].get(order_type) or {"type": order_type}
         
-    p = {"tgt": cfg["tgt"], "sl": cfg["sl"], "qty": cfg["qty"], 
-         "tgt_type": cfg["tgt_type"], "sl_type": cfg["sl_type"]}
+    p = {"tgt": cfg["tgt"], "sl": cfg["sl"], "qty": cfg["qty"],
+         "tgt_type": cfg["tgt_type"], "sl_type": cfg["sl_type"],
+         "exit_on_opposite": cfg.get("exit_on_opposite", False), "trail": cfg.get("trail", False),
+         "trail_type": cfg.get("trail_type", "LTP"), "trail_trigger": cfg.get("trail_trigger", 20),
+         "trail_point": cfg.get("trail_point", 1), "trail_gap": cfg.get("trail_gap", 20)}
     p.update(params or {})
     
     strike, opt, index = int(sig["strike"]), sig["opt"], sig["index"]
@@ -63,8 +67,18 @@ def build_payload(sig: dict, template: dict = None, params: dict = None) -> dict
         "qty": max(1, int(_num(p["qty"], 1))),
         "tgt": _num(p["tgt"], 0), "sl": _num(p["sl"], 0),
         "tgt_type": p["tgt_type"], "sl_type": p["sl_type"],
+        "exit_on_opposite": bool(p["exit_on_opposite"]), "is_trail": bool(p["trail"]),
+        "trail_type": p["trail_type"], "trail_trigger": _num(p["trail_trigger"], 0),
+        "trail_gap": _num(p["trail_gap"], 0), "trail_point": _num(p["trail_point"], 0),
     }
-    return _fill(copy.deepcopy(template), ctx)
+    payload = _fill(copy.deepcopy(template), ctx)
+    # The UI controls always win, even if the JSON template holds fixed values for these keys.
+    payload.update({
+        "exit_on_opposite": ctx["exit_on_opposite"], "is_trail_set": ctx["is_trail"],
+        "trail_type": ctx["trail_type"], "trail_trigger": ctx["trail_trigger"],
+        "trail_gap": ctx["trail_gap"], "trail_point": ctx["trail_point"],
+    })
+    return payload
 
 
 def _describe(sig: dict) -> str:

@@ -380,9 +380,11 @@ def main_page():
                             .classes("w-full border rounded"):
                         ad_template = ui.textarea("JSON template (strategy_order)", value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
                             .classes("w-full").props("input-style='font-family: monospace; font-size: 12px' rows=14")
-                        ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp}. "
+                        ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp} "
+                                 "{exit_on_opposite} {is_trail} {trail_type} {trail_trigger} {trail_point} {trail_gap}. "
                                  "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
-                                 "Target/SL types are set below.").classes("text-xs text-gray-500")
+                                 "Target/SL/trail values come from the controls below; exit_on_opposite, is_trail_set and the trail_* "
+                                 "keys are always set from the controls, whatever this template says.").classes("text-xs text-gray-500")
                     
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
                         ad_qty = ui.number("Quantity", value=ad_cfg["qty"], min=1, precision=0, step=1).classes("flex-1")
@@ -394,6 +396,16 @@ def main_page():
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
                         ad_sl_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("sl_type", "POINT"), label="Stop Loss Type").classes("flex-1")
                         ad_sl = ui.number("Stop Loss Value", value=ad_cfg["sl"], min=0, step=1).classes("flex-1")
+
+                    ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
+                    ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
+                    with ui.row().classes("w-full gap-2 no-wrap items-center"):
+                        ad_trail_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("trail_type", "LTP"), label="Trail Type").classes("flex-1")
+                        ad_trail_trigger = ui.number("Trail Trigger", value=ad_cfg.get("trail_trigger", 20), min=0, step=1).classes("flex-1")
+                        ad_trail_point = ui.number("Trail Point", value=ad_cfg.get("trail_point", 1), min=0, step=1).classes("flex-1")
+                        ad_trail_gap = ui.number("Trail Gap", value=ad_cfg.get("trail_gap", 20), min=0, step=1).classes("flex-1")
+                    for _w in (ad_trail_type, ad_trail_trigger, ad_trail_point, ad_trail_gap):
+                        _w.bind_enabled_from(ad_trail, "value")
 
                     ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
                     ad_status = ui.label("")
@@ -419,7 +431,19 @@ def main_page():
                             return None, "Target and SL must be numbers above 0."
                         if qty is None or qty < 1 or qty != int(qty):
                             return None, "Quantity must be a whole number of at least 1."
-                        return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value}, ""
+                        trail = bool(ad_trail.value)
+                        t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
+                        if trail:
+                            if None in (t_trig, t_point, t_gap) or t_trig <= 0 or t_point <= 0 or t_gap <= 0:
+                                return None, "Trail Trigger, Trail Point and Trail Gap must be numbers above 0."
+                            if ad_trail_type.value == "POINT" and t_gap >= t_trig:
+                                return None, "With Trail Type POINT, Trail Gap must be smaller than Trail Trigger."
+                        return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
+                                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail,
+                                "trail_type": ad_trail_type.value,
+                                "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
+                                "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
+                                "trail_gap": t_gap if t_gap is not None else ad_cfg.get("trail_gap", 20)}, ""
 
                     def save_auto_order_settings():
                         obj, err = _parse_template()
@@ -436,7 +460,10 @@ def main_page():
                             return
                         ad_cfg["templates"]["strategy_order"] = obj
                         ad_cfg.update(webhook_url=url, confirmed=bool(ad_confirm.value), **nums)
+                        trail_txt = (f"trail ON ({nums['trail_type']}: trigger {nums['trail_trigger']}, point {nums['trail_point']}, "
+                                     f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
                         ad_status.set_text(f"\u2705 Saved: target {nums['tgt']} ({nums['tgt_type']}), SL {nums['sl']} ({nums['sl_type']}), qty {nums['qty']}; "
+                                           f"{trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
                                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                                            f"(live orders need both). Lasts until the app restarts.")
                         log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} AlgoDelta settings saved.")
