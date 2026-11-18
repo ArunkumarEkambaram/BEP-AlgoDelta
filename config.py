@@ -8,12 +8,12 @@ NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
 # Underlying key used for option-chain / option-expiry lookups
 NIFTY_OPTION_UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
-# Indices the BEP Support monitor can watch.
+# Indices the BEP Support monitor can watch (NIFTY only). To bring SENSEX back, add:
+#   "SENSEX": {"index_key": "BSE_INDEX|SENSEX", "underlying_key": "BSE_INDEX|SENSEX",
+#              "strike_interval": 100, "enabled": False},
 INDEXES = {
     "NIFTY":  {"index_key": "NSE_INDEX|Nifty 50", "underlying_key": "NSE_INDEX|Nifty 50",
                "strike_interval": 50,  "enabled": True},
-    "SENSEX": {"index_key": "BSE_INDEX|SENSEX",   "underlying_key": "BSE_INDEX|SENSEX",
-               "strike_interval": 100, "enabled": False},
 }
 
 STRIKE_INTERVAL = 50        

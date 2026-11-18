@@ -376,12 +376,13 @@ def main_page():
                     ad_url = ui.input("Webhook URL (AlgoDelta: Copy Webhook)", value=ad_cfg["webhook_url"],
                                       password=True, password_toggle_button=True).classes("w-full")
                     
-                    ad_template = ui.textarea("JSON template (strategy_order)", value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
-                        .classes("w-full").props("input-style='font-family: monospace; font-size: 12px' rows=14")
-                    
-                    ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp}. "
-                             "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
-                             "Target/SL types are set below.").classes("text-xs text-gray-500")
+                    with ui.expansion("JSON template (strategy_order)", icon="data_object", value=False) \
+                            .classes("w-full border rounded"):
+                        ad_template = ui.textarea("JSON template (strategy_order)", value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
+                            .classes("w-full").props("input-style='font-family: monospace; font-size: 12px' rows=14")
+                        ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp}. "
+                                 "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
+                                 "Target/SL types are set below.").classes("text-xs text-gray-500")
                     
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
                         ad_qty = ui.number("Quantity", value=ad_cfg["qty"], min=1, precision=0, step=1).classes("flex-1")
@@ -576,7 +577,7 @@ def main_page():
             return
         active = [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]
         if not active:
-            status_label.set_text("Status: no index selected (tick NIFTY and/or SENSEX at the top)")
+            status_label.set_text("Status: no index selected (tick NIFTY at the top)")
             return
         if polling["busy"]:
             return
