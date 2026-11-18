@@ -93,7 +93,8 @@ def _load_orders_today() -> list:
             rows = [dict(r) for r in csv.DictReader(f)]
     except OSError:
         return []
-    for r in rows:                                    # live columns are recalculated after start
+    for i, r in enumerate(rows):                      # live columns are recalculated after start
+        r["id"] = i                                   # older files have no id column; ids follow file order
         for k in ("entry", "exit", "points", "pnl"):
             r.setdefault(k, "--")
         r.setdefault("ltp_live", "")
