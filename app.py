@@ -376,16 +376,51 @@ def main_page():
                     ad_url = ui.input("Webhook URL (AlgoDelta: Copy Webhook)", value=ad_cfg["webhook_url"],
                                       password=True, password_toggle_button=True).classes("w-full")
                     
-                    with ui.expansion("JSON template (strategy_order)", icon="data_object", value=False) \
-                            .classes("w-full border rounded"):
-                        ad_template = ui.textarea("JSON template (strategy_order)", value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
-                            .classes("w-full").props("input-style='font-family: monospace; font-size: 12px' rows=14")
+                    # JSON template: edited in a popup, opened from the "JSON template" link.
+                    with ui.row().classes("items-center gap-2"):
+                        ui.button("JSON template", icon="edit", on_click=lambda: tpl_dialog.open()) \
+                            .props("flat dense no-caps color=primary").classes("underline")
+                        tpl_tag = ui.badge("default").props("outline color=grey-7")
+
+                    with ui.dialog() as tpl_dialog, ui.card().style("width: 720px; max-width: 95vw"):
+                        ui.label(f"{name} \u2014 JSON template (strategy_order)").classes("text-lg font-bold")
+                        ad_template = ui.textarea(value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
+                            .classes("w-full").props("outlined input-style='font-family: monospace; font-size: 12px' rows=18")
                         ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp} "
                                  "{exit_on_opposite} {is_trail} {trail_type} {trail_trigger} {trail_point} {trail_gap}. "
                                  "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
-                                 "Target/SL/trail values come from the controls below; exit_on_opposite, is_trail_set and the trail_* "
-                                 "keys are always set from the controls, whatever this template says.").classes("text-xs text-gray-500")
-                    
+                                 "Target/SL/trail values come from the controls in the AlgoDelta box; exit_on_opposite, is_trail_set and the trail_* "
+                                 "keys are always set from those controls, whatever this template says.").classes("text-xs text-gray-500")
+                        tpl_status = ui.label("").classes("text-sm")
+
+                        def reset_template():
+                            ad_template.set_value(json.dumps(config._STRATEGY_ORDER, indent=2))
+                            tpl_status.set_text("Reset to the default template (not saved yet; click Save).")
+
+                        def save_from_dialog():
+                            save_auto_order_settings()
+                            tpl_status.set_text(ad_status.text)
+
+                        with ui.row().classes("w-full gap-2 justify-end"):
+                            ui.button("Reset to default", icon="restart_alt", on_click=reset_template).props("flat color=orange")
+                            ui.button("Preview JSON", on_click=lambda: preview_auto_order()).props("outline")
+                            ui.button("Save", on_click=save_from_dialog)
+                            ui.button("Close", on_click=tpl_dialog.close).props("flat")
+
+                    def update_tpl_tag():
+                        try:
+                            cur = json.loads(ad_template.value)
+                        except ValueError:
+                            cur = None
+                        text = "default" if cur == config._STRATEGY_ORDER else "edited"
+                        if cur != ad_cfg["templates"]["strategy_order"]:
+                            text += " \u00b7 not saved"
+                        tpl_tag.set_text(text)
+                        tpl_tag.props("outline color=" + ("grey-7" if text == "default" else "orange"))
+
+                    update_tpl_tag()
+                    ad_template.on_value_change(lambda ev: update_tpl_tag())
+
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
                         ad_qty = ui.number("Quantity", value=ad_cfg["qty"], min=1, precision=0, step=1).classes("flex-1")
                         
@@ -459,6 +494,7 @@ def main_page():
                             ad_status.set_text("\u274c The webhook URL must start with https://")
                             return
                         ad_cfg["templates"]["strategy_order"] = obj
+                        update_tpl_tag()
                         ad_cfg.update(webhook_url=url, confirmed=bool(ad_confirm.value), **nums)
                         trail_txt = (f"trail ON ({nums['trail_type']}: trigger {nums['trail_trigger']}, point {nums['trail_point']}, "
                                      f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
