@@ -172,12 +172,28 @@ class Engine:
         self.connected = ok
         if ok:
             self.user_name, self.connection_text = info, f"Connected ({info})"
-            self.log("Upstox token saved and verified.")
+            settings_store.save_token(token, _now().strftime("%Y-%m-%d"))
+            self.log("Upstox token verified and saved for today.")
         else:
             self.connection_text = f"Connection failed - {info}"
             self.log(f"Token test failed: {info}")
         self.bump("settings")
         return ok, self.connection_text
+
+    async def auto_connect(self):
+        """At start: reconnect with today's saved token, if there is one."""
+        token = settings_store.load_token(_now().strftime("%Y-%m-%d"))
+        if not token:
+            self.log("No saved Upstox token for today - enter it on the Setup page.")
+            return
+        self.log("Reconnecting with today's saved Upstox token...")
+        ok, text = await self.connect(token)
+        if not ok:
+            self.connection_text += " (saved token rejected - enter a new one)"
+
+    def forget_token(self):
+        settings_store.forget_token()
+        self.log("Saved Upstox token deleted from this computer.")
 
     def upload_bep(self, name, data: bytes, fname: str):
         ok, msg, _warns = bep.load_csv(data, fname, name)

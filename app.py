@@ -442,8 +442,8 @@ def orders_page():
 # ====================================================================== Setup (once a day)
 def setup_page():
     ui.label("Setup").classes("text-2xl font-bold")
-    ui.label("Needed once a day. Everything except the Upstox token is saved and comes back after a restart; "
-             "the app always starts in Dry run.").classes("text-xs opacity-70")
+    ui.label("Needed once a day. Everything here is saved on this computer and comes back after a restart "
+             "(the Upstox token only for the same day); the app always starts in Dry run.").classes("text-xs opacity-70")
 
     with ui.row().classes("w-full gap-4 items-stretch"):
         # ---- Upstox
@@ -458,6 +458,12 @@ def setup_page():
                 conn.set_text(text)
                 ui.notify(text, type="positive" if ok else "negative")
             ui.button("Save & test connection", icon="link", on_click=connect).classes("w-full")
+            ui.label("A verified token is saved on this computer for today only, so a restart the same day "
+                     "reconnects automatically.").classes("text-xs opacity-70")
+            ui.button("Forget saved token", icon="delete", on_click=lambda: (engine.forget_token(),
+                                                                             ui.notify("Saved token deleted"))) \
+                .props("flat dense no-caps color=grey-6")
+            ui.timer(1.0, lambda: conn.set_text(engine.connection_text))
 
         # ---- BEP files
         with ui.card().classes("flex-1 min-w-[320px]"):
@@ -702,6 +708,7 @@ def logs_page():
 
 
 # ====================================================================== background engine (once for the whole app)
+app.on_startup(engine.auto_connect)
 engine.scan_timer = app.timer(config.SCAN_INTERVAL_SECONDS, engine.scan)
 app.timer(config.OPENING_TICK_SECONDS, engine.opening)
 

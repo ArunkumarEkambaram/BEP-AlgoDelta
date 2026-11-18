@@ -3,8 +3,9 @@ settings_store.py - keeps the "once a day" settings in settings.json next to the
 not ask for them again: strike count, scan interval, max orders/day and each index's AlgoDelta settings
 (webhook URL, JSON template, target / SL / trail, quantity, max points above BEP, exit on opposite).
 
-Deliberately NOT saved: the Upstox token (memory only), Dry run (the app always starts in Dry run),
-Pause alerts and Pause algo trade.
+The Upstox token is saved separately in upstox_token.json with today's date and is only reused on that same
+date (Upstox tokens expire daily). Deliberately NOT saved: Dry run (the app always starts in Dry run),
+Pause alerts and Pause algo trade. settings.json and upstox_token.json are in .gitignore.
 """
 import json
 import os
@@ -12,6 +13,7 @@ import os
 import config
 
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
+TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upstox_token.json")
 _AUTO_KEYS = ("webhook_url", "confirmed", "tgt", "sl", "tgt_type", "sl_type", "qty", "exit_on_opposite", "trail",
               "trail_type", "trail_trigger", "trail_point", "trail_gap", "max_above_bep", "templates")
 
@@ -52,3 +54,33 @@ def save() -> str:
         return "Settings saved."
     except OSError as ex:
         return f"Could not save settings ({ex})."
+
+
+def save_token(token: str, day: str):
+    """Keeps today's Upstox token on this computer so a restart the same day reconnects without asking."""
+    try:
+        with open(TOKEN_PATH, "w", encoding="utf-8") as f:
+            json.dump({"date": day, "token": token}, f)
+        try:
+            os.chmod(TOKEN_PATH, 0o600)               # readable by this user only (where the OS supports it)
+        except OSError:
+            pass
+    except OSError:
+        pass
+
+
+def load_token(day: str):
+    """Today's saved Upstox token, or None (missing, unreadable, or saved on another date)."""
+    try:
+        with open(TOKEN_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    return data.get("token") if data.get("date") == day and data.get("token") else None
+
+
+def forget_token():
+    try:
+        os.remove(TOKEN_PATH)
+    except OSError:
+        pass
