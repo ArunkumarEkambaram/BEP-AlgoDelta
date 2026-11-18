@@ -449,9 +449,11 @@ class BepMonitor:
                 return
             if key not in self._notified:
                 self._notified.add(key)
+                window = self.candle_windows.get(start) or set(self.strikes or [])
                 self.new_support.append({
                     "index": self.name, "strike": row["strike"], "opt": row["opt"], "bep": row["bep"], "close": row["ltp"],
-                    "time": row["time"], "rule": row["rule"],
+                    "time": row["time"], "rule": row["rule"], "day": start.strftime("%Y-%m-%d"),
+                    "in_window": row["strike"] in window,
                 })
         except Exception:
             pass

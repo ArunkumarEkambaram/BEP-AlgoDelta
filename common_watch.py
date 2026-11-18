@@ -9,6 +9,10 @@ the common price:
     must first close at or below, then cross. Fires once (alert + "Place order" button).
   - FAILED: after triggering, a later candle closes BELOW the common price. The row turns red, no alert.
 Rows are kept for the day in common_watch_YYYY-MM-DD.json next to the app.
+
+\u2b50 rows (source "star") are added automatically for a LIVE first-support-of-the-day (\u2b50) on the BEP Support
+board, within that candle's ATM window. They are TRIGGERED at once (Place order ready, no extra alert - the board
+already alerts) and turn FAILED when the board's support row turns red. Their candles are not re-checked here.
 """
 import json
 import os
@@ -85,6 +89,37 @@ class CommonWatch:
         self.save()
         return added
 
+    def add_star(self, ev: dict, now=None):
+        """Adds a \u2b50 row from a live BEP Support first-support event. Returns the row, or None if already there."""
+        now = now or datetime.now(IST)
+        self._roll_day(now)
+        if any(r.get("source") == "star" and r["strike"] == int(ev["strike"]) and r["opt"] == ev["opt"]
+               and r["trig_time"] == ev["time"] for r in self.rows):
+            return None
+        self._seq += 1
+        row = {"id": self._seq, "index": self.index, "strike": int(ev["strike"]), "opt": ev["opt"],
+               "price": round(float(ev["bep"]), 2), "tf": 5, "added_at": now.isoformat(), "status": "triggered",
+               "source": "star", "baseline": "star", "last_done": None, "prev_close": None,
+               "last_close": float(ev["close"]), "last_time": ev["time"], "trig_time": ev["time"],
+               "trig_close": float(ev["close"]), "fail_time": "", "fail_close": None, "order_status": ""}
+        self.rows.append(row)
+        self.save()
+        return row
+
+    def sync_star_failures(self, support: dict) -> bool:
+        """Marks \u2b50 rows FAILED when their BEP Support board row (same strike, leg and time) has turned red."""
+        changed = False
+        for r in self.rows:
+            if r.get("source") != "star" or r["status"] != "triggered":
+                continue
+            b = next((e for e in support.get(r["opt"], []) if e["strike"] == r["strike"] and e["time"] == r["trig_time"]), None)
+            if b and b.get("state") == "red":
+                r.update(status="failed", fail_time=b.get("fail_time") or "", fail_close=b.get("fail_close"))
+                changed = True
+        if changed:
+            self.save()
+        return changed
+
     def remove(self, row_id: int):
         self.rows = [r for r in self.rows if r["id"] != row_id]
         self.save()
@@ -110,7 +145,7 @@ class CommonWatch:
         triggered = []
         changed = False
         for r in self.rows:
-            if r["status"] == "failed":
+            if r["status"] == "failed" or r.get("source") == "star":
                 continue
             tf = timedelta(minutes=r["tf"])
             ref = now - FINALIZE_DELAY
@@ -153,6 +188,12 @@ class CommonWatch:
 
     @staticmethod
     def status_text(r) -> str:
+        if r.get("source") == "star":
+            text = f"\u2b50 support at {r['trig_time']}, close {r['trig_close']:.2f}"
+            if r["status"] == "failed":
+                fc = r.get("fail_close")
+                text += f" \u2192 failed at {r['fail_time']}" + (f", close {fc:.2f}" if fc is not None else "")
+            return text
         if r["status"] == "triggered":
             return f"Triggered at {r['trig_time']}, close {r['trig_close']:.2f}"
         if r["status"] == "failed":

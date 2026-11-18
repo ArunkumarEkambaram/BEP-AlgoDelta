@@ -639,9 +639,10 @@ def main_page():
             cw = watches[name]
             with ui.card().classes("w-full rounded-xl shadow-md") as cw_card:
                 ui.label(f"{name} \u2014 Common Price Watch").classes("text-md font-bold")
-                ui.label("Alerts when a leg's candle closes ABOVE the common price (crossing up from at or below). "
-                         "Nothing is placed automatically: use Place order. Red = closed back below after triggering."
-                         ).classes("text-xs text-gray-500")
+                ui.label("Manual rows alert when a leg's candle closes ABOVE the common price (crossing up from at or below); "
+                         "red = closed back below after triggering. \u2b50 rows are added automatically for a live first support of "
+                         "the day inside the ATM window (Level = BEP); red when the board row turns red. "
+                         "Nothing is placed automatically: use Place order.").classes("text-xs text-gray-500")
                 with ui.row().classes("items-end gap-4"):
                     cw_strike = ui.number("Strike", value=(mon.strikes[len(mon.strikes) // 2] if mon.strikes else None),
                                           step=config.INDEXES[name]["strike_interval"], precision=0).classes("w-32")
@@ -678,8 +679,10 @@ def main_page():
                         return
                     sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
                            "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
-                           "expiry": mon.expiry, "order_type": "strategy_order", "kind": "common",
-                           "kind_label": "Manual \u2014 common price", "time": datetime.now().strftime("%H:%M:%S")}
+                           "expiry": mon.expiry, "order_type": "strategy_order",
+                           "kind": "star" if r.get("source") == "star" else "common",
+                           "kind_label": "Manual \u2014 \u2b50 support" if r.get("source") == "star" else "Manual \u2014 common price",
+                           "time": datetime.now().strftime("%H:%M:%S")}
                     cw.set_order_status(row_id, "sending")
                     render_watch.refresh()
                     res = await run.io_bound(order_bridge.send_order, sig)
@@ -701,12 +704,13 @@ def main_page():
                     if not cw.rows:
                         ui.label("No strikes watched yet.").classes("text-sm text-gray-500")
                         return
-                    with ui.grid(columns="90px 50px 110px 60px 130px 1fr 220px").classes("w-full items-center gap-x-3 gap-y-1"):
-                        for head in ("Strike", "Type", "Common price", "TF", "Last close", "Status", ""):
+                    with ui.grid(columns="80px 90px 50px 110px 60px 130px 1fr 220px").classes("w-full items-center gap-x-3 gap-y-1"):
+                        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", ""):
                             ui.label(head).classes("text-xs font-bold text-gray-600")
                         for r in cw.rows:
                             bg = {"triggered": "bg-green-2", "failed": "bg-red-2"}.get(r["status"], "")
-                            cells = [str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
+                            src = f"\u2b50 {r['trig_time']}" if r.get("source") == "star" else "Manual"
+                            cells = [src, str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
                                      (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
                                      CommonWatch.status_text(r)]
                             for txt in cells:
@@ -815,6 +819,10 @@ def main_page():
                     support_alerts = mon.pop_support_alerts()
                     if support_alerts:
                         notifier.dispatch_support_alerts(support_alerts, log_fn=log)
+                    star_added = add_star_rows(name, support_alerts)
+                    star_failed = watches[name].sync_star_failures(mon.support)
+                    if star_added or star_failed:
+                        p["render_watch"]()
 
                     now_ist = datetime.now(market_utils.IST)
                     rows_before = [(r["id"], r["status"], r["last_time"]) for r in watches[name].rows]
@@ -830,6 +838,25 @@ def main_page():
             await refresh_order_tracking()
         finally:
             polling["busy"] = False
+
+    def add_star_rows(name, events) -> bool:
+        """Auto-adds live \u2b50 supports (inside that candle's ATM window) to the Common Price Watch.
+        A 09:15-candle \u2b50 is skipped when that side already has its 09:15 opening order."""
+        mon, cw, added = monitors[name], watches[name], False
+        for e in events or []:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            if not e.get("in_window"):
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at {e['time']} not added to watch (outside ATM window).")
+                continue
+            if e["time"] == "09:15" and (e.get("day"), e["opt"]) in mon.side_lock:
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at 09:15 not added to watch "
+                    f"({e['opt']} already has its 09:15 opening order).")
+                continue
+            if cw.add_star(e):
+                added = True
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at {e['time']} added to watch "
+                    f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")
+        return added
 
     async def dispatch_orders(name):
         """Sends every queued order signal of this index right away and records the result."""
