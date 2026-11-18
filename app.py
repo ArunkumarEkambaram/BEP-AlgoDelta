@@ -160,7 +160,7 @@ def main_page():
             token_input = ui.input("Upstox Access Token", value=config.UPSTOX_ACCESS_TOKEN, password=True, password_toggle_button=True).classes("w-full")
             connection_label = ui.label("Status: not connected" if not config.UPSTOX_ACCESS_TOKEN else "Status: unverified")
 
-        async def save_and_test_token():
+        def save_and_test_token():
             global token_connected
             token = token_input.value.strip()
             if not token:
@@ -169,8 +169,7 @@ def main_page():
                 return
             client.access_token = token
             client.headers["Authorization"] = f"Bearer {token}"
-            connection_label.set_text("Status: testing...")
-            ok, info = await run.io_bound(upstox_client.test_connection, token)
+            ok, info = upstox_client.test_connection(token)
             if ok:
                 connection_label.set_text(f"Status: connected ({info})")
                 token_connected = True
@@ -529,103 +528,103 @@ def main_page():
                     "render_board": render_board, "render_first": render_first_cards,
                     "render_latest": render_latest_cards, "render_all": render_all}
 
-    for _idx in config.INDEXES:
-        panels[_idx] = build_panel(_idx)
+        for _idx in config.INDEXES:
+            panels[_idx] = build_panel(_idx)
 
-    ui.separator()
-    ui.label("AlgoDelta orders \u2014 dry run and live").classes("text-md font-bold")
-    orders_table = ui.table(columns=ORDER_COLUMNS, rows=list(reversed(order_log)), row_key="id").classes("w-full").props("dense")
-    orders_table.add_slot("body-cell-status", '''
-        <q-td key="status" :props="props">
-            <q-badge :color="props.value === 'SENT' ? 'green' : props.value === 'DRY RUN' ? 'blue' : props.value === 'FAILED' ? 'red' : 'orange'">{{ props.value }}</q-badge>
-        </q-td>''')
-    orders_table.add_slot("body-cell-payload", '''
-        <q-td key="payload" :props="props" style="max-width: 420px; white-space: normal; word-break: break-all; font-family: monospace; font-size: 11px">{{ props.value }}</q-td>''')
-    orders_table.add_slot("body-cell-detail", '''
-        <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
+        ui.separator()
+        ui.label("AlgoDelta orders \u2014 dry run and live").classes("text-md font-bold")
+        orders_table = ui.table(columns=ORDER_COLUMNS, rows=list(reversed(order_log)), row_key="id").classes("w-full").props("dense")
+        orders_table.add_slot("body-cell-status", '''
+            <q-td key="status" :props="props">
+                <q-badge :color="props.value === 'SENT' ? 'green' : props.value === 'DRY RUN' ? 'blue' : props.value === 'FAILED' ? 'red' : 'orange'">{{ props.value }}</q-badge>
+            </q-td>''')
+        orders_table.add_slot("body-cell-payload", '''
+            <q-td key="payload" :props="props" style="max-width: 420px; white-space: normal; word-break: break-all; font-family: monospace; font-size: 11px">{{ props.value }}</q-td>''')
+        orders_table.add_slot("body-cell-detail", '''
+            <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
 
-    def add_order_row(sig, res):
-        row = {
-            "id": len(order_log), "time": datetime.now().strftime("%H:%M:%S"), "index": sig["index"], "opt": sig["opt"],
-            "strike": sig["strike"], "kind": "Opening candle", "bep": round(float(sig["bep"]), 2),
-            "ltp": round(float(sig["ltp"]), 2),
-            "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
-            "payload": json.dumps(res["payload"]),
-        }
-        order_log.append(row)
-        _save_order_row(row)
-        orders_table.rows = list(reversed(order_log))
-        orders_table.update()
+        def add_order_row(sig, res):
+            row = {
+                "id": len(order_log), "time": datetime.now().strftime("%H:%M:%S"), "index": sig["index"], "opt": sig["opt"],
+                "strike": sig["strike"], "kind": "Opening candle", "bep": round(float(sig["bep"]), 2),
+                "ltp": round(float(sig["ltp"]), 2),
+                "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
+                "payload": json.dumps(res["payload"]),
+            }
+            order_log.append(row)
+            _save_order_row(row)
+            orders_table.rows = list(reversed(order_log))
+            orders_table.update()
 
-    def download_orders_csv():
-        ui.download(export_utils.build_csv(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.csv")
+        def download_orders_csv():
+            ui.download(export_utils.build_csv(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.csv")
 
-    def download_orders_xlsx():
-        ui.download(export_utils.build_xlsx(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+        def download_orders_xlsx():
+            ui.download(export_utils.build_xlsx(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
 
-    with ui.row().classes("gap-3"):
-        ui.button("Download CSV", on_click=download_orders_csv)
-        ui.button("Download XLSX", on_click=download_orders_xlsx)
+        with ui.row().classes("gap-3"):
+            ui.button("Download CSV", on_click=download_orders_csv)
+            ui.button("Download XLSX", on_click=download_orders_xlsx)
 
-    ui.separator()
-    log_area = ui.markdown("")
+        ui.separator()
+        log_area = ui.markdown("")
 
-    async def poll():
-        if not token_connected:
-            status_label.set_text("Status: waiting for valid token")
-            return
-        active = [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]
-        if not active:
-            status_label.set_text("Status: no index selected (tick NIFTY and/or SENSEX at the top)")
-            return
-        if polling["busy"]:
-            return
-        polling["busy"] = True
-        try:
-            ltps, err = await run.io_bound(fetch_index_ltps, active)
-            if market_utils.is_market_open():
-                status_label.set_text("Status: monitoring " + " + ".join(active))
-            else:
-                status_label.set_text(f"Status: market closed (Mon\u2013Fri {config.MARKET_OPEN}\u2013{config.MARKET_CLOSE} IST)")
+        async def poll():
+            if not token_connected:
+                status_label.set_text("Status: waiting for valid token")
+                return
+            active = [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]
+            if not active:
+                status_label.set_text("Status: no index selected (tick NIFTY and/or SENSEX at the top)")
+                return
+            if polling["busy"]:
+                return
+            polling["busy"] = True
+            try:
+                ltps, err = await run.io_bound(fetch_index_ltps, active)
+                if market_utils.is_market_open():
+                    status_label.set_text("Status: monitoring " + " + ".join(active))
+                else:
+                    status_label.set_text(f"Status: market closed (Mon\u2013Fri {config.MARKET_OPEN}\u2013{config.MARKET_CLOSE} IST)")
 
-            for name in active:
-                if not config.INDEXES[name]["enabled"]:
-                    continue
-                ltp = ltps.get(name)
-                if ltp is None:
-                    log(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {name} LTP unavailable ({err})")
-                    continue
-                p, mon = panels[name], monitors[name]
-                p["ltp_label"].set_text(f"{name} LTP: {ltp}")
+                for name in active:
+                    if not config.INDEXES[name]["enabled"]:
+                        continue
+                    ltp = ltps.get(name)
+                    if ltp is None:
+                        log(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {name} LTP unavailable ({err})")
+                        continue
+                    p, mon = panels[name], monitors[name]
+                    p["ltp_label"].set_text(f"{name} LTP: {ltp}")
 
-                try:
-                    res = await run.io_bound(mon.step, client, ltp, None, datetime.now(market_utils.IST))
-                    for msg in res["logs"]:
-                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-                    if mon.strikes:
-                        p["window_label"].set_text(f"Window: {min(mon.strikes)} - {max(mon.strikes)}")
-                    if res["board_changed"] or res["recalculated"]:
-                        p["render_board"]()
-                    if res.get("first_updated"):
-                        p["render_first"]()
-                    if res.get("latest_updated"):
-                        p["render_latest"]()
-                    support_alerts = mon.pop_support_alerts()
-                    if support_alerts:
-                        notifier.dispatch_support_alerts(support_alerts, log_fn=log)
-                    
-                    for sig in mon.pop_order_signals():
-                        res = await run.io_bound(order_bridge.send_order, sig)
-                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
-                        add_order_row(sig, res)
-                        ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
-                                  position="top", timeout=15000)
-                except Exception as ex:
-                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
-        finally:
-            polling["busy"] = False
+                    try:
+                        res = await run.io_bound(mon.step, client, ltp, None, datetime.now(market_utils.IST))
+                        for msg in res["logs"]:
+                            log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                        if mon.strikes:
+                            p["window_label"].set_text(f"Window: {min(mon.strikes)} - {max(mon.strikes)}")
+                        if res["board_changed"] or res["recalculated"]:
+                            p["render_board"]()
+                        if res.get("first_updated"):
+                            p["render_first"]()
+                        if res.get("latest_updated"):
+                            p["render_latest"]()
+                        support_alerts = mon.pop_support_alerts()
+                        if support_alerts:
+                            notifier.dispatch_support_alerts(support_alerts, log_fn=log)
+                        
+                        for sig in mon.pop_order_signals():
+                            res = await run.io_bound(order_bridge.send_order, sig)
+                            log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
+                            add_order_row(sig, res)
+                            ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                                      position="top", timeout=15000)
+                    except Exception as ex:
+                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
+            finally:
+                polling["busy"] = False
 
-    scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
+        scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
 
 
 ui.run(title="BEP Support Monitor", port=8082, reload=False)
