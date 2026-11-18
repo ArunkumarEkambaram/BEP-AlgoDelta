@@ -8,16 +8,25 @@ NIFTY_INDEX_KEY = "NSE_INDEX|Nifty 50"
 # Underlying key used for option-chain / option-expiry lookups
 NIFTY_OPTION_UNDERLYING_KEY = "NSE_INDEX|Nifty 50"
 
-# Indices the BEP Support monitor can watch.
+# Indices the BEP Support monitor can watch (NIFTY only). To bring SENSEX back, add:
+#   "SENSEX": {"index_key": "BSE_INDEX|SENSEX", "underlying_key": "BSE_INDEX|SENSEX",
+#              "strike_interval": 100, "enabled": False, "lot_size": 20},
 INDEXES = {
     "NIFTY":  {"index_key": "NSE_INDEX|Nifty 50", "underlying_key": "NSE_INDEX|Nifty 50",
-               "strike_interval": 50,  "enabled": True},
-    "SENSEX": {"index_key": "BSE_INDEX|SENSEX",   "underlying_key": "BSE_INDEX|SENSEX",
-               "strike_interval": 100, "enabled": False},
+               "strike_interval": 50,  "enabled": True, "lot_size": 65},
 }
 
 STRIKE_INTERVAL = 50        
 STRIKES_EACH_SIDE = 2       # nearest strike +/- 2 -> 5 strikes total
+
+# Upstox trade book refresh for the AlgoDelta orders table (Entry / Exit of SENT orders).
+TRADES_REFRESH_SECONDS = 30
+
+# 09:15 opening order. From PREP_START to 09:15 the app reads NIFTY's pre-open price, picks the strike just
+# below and just above it (same two for CE and PE) and looks up their BEPs. From 09:15:00 to 09:20 it checks
+# only those strikes every OPENING_TICK_SECONDS with one Upstox call. Not prepared before 09:15 = no order today.
+OPENING_PREP_START = "09:08"
+OPENING_TICK_SECONDS = 1
 
 # Live scan interval (seconds).
 SCAN_INTERVAL_SECONDS = 10
@@ -52,15 +61,17 @@ AUTO_ORDER_PAUSED = False         # "Pause algo trade" button.
 AUTO_ORDER_DAILY_LIMIT = 20       # "Max orders/day" box: hard cap on LIVE orders per day.
 
 # Per-index AlgoDelta settings. 
-# "tgt_type" and "sl_type" can be "POINT" or "LTP".
+# "tgt_type", "sl_type" and "trail_type" can be "POINT" or "LTP".
+# The UI controls always decide exit_on_opposite, is_trail_set and the trail_* values
+# (order_bridge.build_payload writes them over whatever the JSON template holds).
 import copy as _copy
 
 _STRATEGY_ORDER = {
     "type": "strategy_order",
-    "exit_on_opposite": True,
+    "exit_on_opposite": "{exit_on_opposite}",
     "is_tgt": True,
     "is_sl": True,
-    "is_trail_set": False,
+    "is_trail_set": "{is_trail}",
     "position_size": "{{strategy.position_size}}",
     "transaction_type": "BUY",
     "script_type": "{opt}",
@@ -70,6 +81,10 @@ _STRATEGY_ORDER = {
     "product": "INTRADAY",
     "quantity": "{qty}",
     "signal_type": "{signal}",
+    "trail_type": "{trail_type}",
+    "trail_trigger": "{trail_trigger}",
+    "trail_gap": "{trail_gap}",
+    "trail_point": "{trail_point}",
     "tgt_type": "{tgt_type}",
     "tgt_value": "{tgt}",
     "sl_type": "{sl_type}",
@@ -80,6 +95,9 @@ def _default_auto_order() -> dict:
     return {
         "webhook_url": "", "confirmed": False,
         "tgt": 50, "sl": 10, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
+        "exit_on_opposite": False,
+        "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
+        "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 20,
         "templates": {"strategy_order": _copy.deepcopy(_STRATEGY_ORDER)},
     }
 

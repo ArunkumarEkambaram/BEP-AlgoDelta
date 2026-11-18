@@ -11,12 +11,17 @@ import config
 import upstox_client
 import notifier
 import order_bridge
+import trade_tracker
 import market_utils
 import export_utils
 import bep
 from bep_monitor import BepMonitor
+from common_watch import CommonWatch
 
 monitors = {name: BepMonitor(name) for name in config.INDEXES}
+watches = {name: CommonWatch(name) for name in config.INDEXES}     # Common Price Watch, one per index
+for _w in watches.values():
+    _w.load()
 client = upstox_client.UpstoxClient(config.UPSTOX_ACCESS_TOKEN)
 
 log_lines = []
@@ -37,12 +42,20 @@ ORDER_COLUMNS = [
     {"name": "strike", "label": "Strike", "field": "strike", "align": "left"},
     {"name": "kind", "label": "Order", "field": "kind", "align": "left"},
     {"name": "bep", "label": "BEP", "field": "bep", "align": "left"},
-    {"name": "ltp", "label": "LTP", "field": "ltp", "align": "left"},
+    {"name": "ltp", "label": "Signal LTP", "field": "ltp", "align": "left"},
+    {"name": "entry", "label": "Entry", "field": "entry", "align": "left"},
+    {"name": "exit", "label": "Exit", "field": "exit", "align": "left"},
+    {"name": "ltp_live", "label": "LTP", "field": "ltp_live", "align": "left"},
+    {"name": "points", "label": "Captured Points", "field": "points", "align": "left"},
+    {"name": "pnl", "label": "P&L \u20b9", "field": "pnl", "align": "left"},
     {"name": "status", "label": "Status", "field": "status", "align": "left"},
     {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
-    {"name": "payload", "label": "JSON", "field": "payload", "align": "left"},
 ]
-ORDER_EXPORT_COLUMNS = [(c["name"], c["label"]) for c in ORDER_COLUMNS]
+# Downloads keep the JSON that was sent; the on-screen table does not show it.
+ORDER_EXPORT_COLUMNS = [(c["name"], c["label"]) for c in ORDER_COLUMNS] + [("payload", "JSON")]
+# Columns saved in today's orders_YYYY-MM-DD.csv (live columns are recalculated, not saved).
+ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
+                      "expiry", "qty"]
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 
 BEP_EXPORT_COLUMNS = [
@@ -81,23 +94,49 @@ def _orders_file() -> str:
 def _load_orders_today() -> list:
     try:
         with open(_orders_file(), newline="", encoding="utf-8") as f:
-            return [dict(r) for r in csv.DictReader(f)]
+            rows = [dict(r) for r in csv.DictReader(f)]
     except OSError:
         return []
+    for i, r in enumerate(rows):                      # live columns are recalculated after start
+        r["id"] = i                                   # older files have no id column; ids follow file order
+        for k in ("entry", "exit", "points", "pnl"):
+            r.setdefault(k, "--")
+        r.setdefault("ltp_live", "")
+    return rows
 
 
 order_log = _load_orders_today()
+
+_LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
+
+
+def _restore_side_locks():
+    """After an app restart, keep CE / PE locked if today's orders file already has an order for that side."""
+    today = datetime.now(market_utils.IST).strftime("%Y-%m-%d")
+    for r in order_log:
+        status = _LOCKING_STATUS.get(r.get("status"))
+        if status and r.get("index") in monitors and r.get("opt") in ("CE", "PE"):
+            mon = monitors[r["index"]]
+            if (today, r["opt"]) not in mon.side_lock:          # first (earliest) order of the side wins
+                mon.lock_side(today, r["opt"], r.get("strike"), r.get("time", ""), status)
+
+
+_restore_side_locks()
 
 
 def _save_order_row(row: dict):
     try:
         path = _orders_file()
         new = not os.path.exists(path)
+        fields = ORDER_FILE_COLUMNS
+        if not new:                                   # keep the header the file was started with
+            with open(path, newline="", encoding="utf-8") as f:
+                fields = next(csv.reader(f), None) or ORDER_FILE_COLUMNS
         with open(path, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=[c["name"] for c in ORDER_COLUMNS])
+            w = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
             if new:
                 w.writeheader()
-            w.writerow({k: row.get(k, "") for k in [c["name"] for c in ORDER_COLUMNS]})
+            w.writerow({k: row.get(k, "") for k in fields})
     except OSError:
         pass
 
@@ -160,7 +199,7 @@ def main_page():
             token_input = ui.input("Upstox Access Token", value=config.UPSTOX_ACCESS_TOKEN, password=True, password_toggle_button=True).classes("w-full")
             connection_label = ui.label("Status: not connected" if not config.UPSTOX_ACCESS_TOKEN else "Status: unverified")
 
-        def save_and_test_token():
+        async def save_and_test_token():
             global token_connected
             token = token_input.value.strip()
             if not token:
@@ -169,7 +208,8 @@ def main_page():
                 return
             client.access_token = token
             client.headers["Authorization"] = f"Bearer {token}"
-            ok, info = upstox_client.test_connection(token)
+            connection_label.set_text("Status: testing...")
+            ok, info = await run.io_bound(upstox_client.test_connection, token)
             if ok:
                 connection_label.set_text(f"Status: connected ({info})")
                 token_connected = True
@@ -324,7 +364,7 @@ def main_page():
     with ui.row().classes("items-center gap-6"):
         status_label = ui.label("Status: waiting for valid token")
         ui.button("Download BEP Support XLSX", icon="download", on_click=download_bep_xlsx).props("dense")
-    polling = {"busy": False}
+    polling = {"busy": False, "trades_at": 0.0}
     ui.label("BEP Support Boards: Green = a green candle touched BEP (low <= BEP) and closed above it. "
              "Red = one of the next 3 candles (15 min) closed below the fail level (the flush candle's low if a failed-breakdown "
              "setup stood behind it, otherwise the trigger candle's own low); after that the row stays green. "
@@ -375,13 +415,51 @@ def main_page():
                     ad_url = ui.input("Webhook URL (AlgoDelta: Copy Webhook)", value=ad_cfg["webhook_url"],
                                       password=True, password_toggle_button=True).classes("w-full")
                     
-                    ad_template = ui.textarea("JSON template (strategy_order)", value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
-                        .classes("w-full").props("input-style='font-family: monospace; font-size: 12px' rows=14")
-                    
-                    ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp}. "
-                             "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
-                             "Target/SL types are set below.").classes("text-xs text-gray-500")
-                    
+                    # JSON template: edited in a popup, opened from the "JSON template" link.
+                    with ui.row().classes("items-center gap-2"):
+                        ui.button("JSON template", icon="edit", on_click=lambda: tpl_dialog.open()) \
+                            .props("flat dense no-caps color=primary").classes("underline")
+                        tpl_tag = ui.badge("default").props("outline color=grey-7")
+
+                    with ui.dialog() as tpl_dialog, ui.card().style("width: 720px; max-width: 95vw"):
+                        ui.label(f"{name} \u2014 JSON template (strategy_order)").classes("text-lg font-bold")
+                        ad_template = ui.textarea(value=json.dumps(ad_cfg["templates"]["strategy_order"], indent=2)) \
+                            .classes("w-full").props("outlined input-style='font-family: monospace; font-size: 12px' rows=18")
+                        ui.label("Placeholders: {symbol} {opt} {signal} {qty} {tgt} {tgt_type} {sl} {sl_type} {strike} {expiry} {index} {bep} {ltp} "
+                                 "{exit_on_opposite} {is_trail} {trail_type} {trail_trigger} {trail_point} {trail_gap}. "
+                                 "{symbol} = index + expiry + strike + CE/PE, e.g. NIFTY17NOV2625400CE. {signal} = UP for CE, DOWN for PE. "
+                                 "Target/SL/trail values come from the controls in the AlgoDelta box; exit_on_opposite, is_trail_set and the trail_* "
+                                 "keys are always set from those controls, whatever this template says.").classes("text-xs text-gray-500")
+                        tpl_status = ui.label("").classes("text-sm")
+
+                        def reset_template():
+                            ad_template.set_value(json.dumps(config._STRATEGY_ORDER, indent=2))
+                            tpl_status.set_text("Reset to the default template (not saved yet; click Save).")
+
+                        def save_from_dialog():
+                            save_auto_order_settings()
+                            tpl_status.set_text(ad_status.text)
+
+                        with ui.row().classes("w-full gap-2 justify-end"):
+                            ui.button("Reset to default", icon="restart_alt", on_click=reset_template).props("flat color=orange")
+                            ui.button("Preview JSON", on_click=lambda: preview_auto_order()).props("outline")
+                            ui.button("Save", on_click=save_from_dialog)
+                            ui.button("Close", on_click=tpl_dialog.close).props("flat")
+
+                    def update_tpl_tag():
+                        try:
+                            cur = json.loads(ad_template.value)
+                        except ValueError:
+                            cur = None
+                        text = "default" if cur == config._STRATEGY_ORDER else "edited"
+                        if cur != ad_cfg["templates"]["strategy_order"]:
+                            text += " \u00b7 not saved"
+                        tpl_tag.set_text(text)
+                        tpl_tag.props("outline color=" + ("grey-7" if text == "default" else "orange"))
+
+                    update_tpl_tag()
+                    ad_template.on_value_change(lambda ev: update_tpl_tag())
+
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
                         ad_qty = ui.number("Quantity", value=ad_cfg["qty"], min=1, precision=0, step=1).classes("flex-1")
                         
@@ -393,8 +471,22 @@ def main_page():
                         ad_sl_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("sl_type", "POINT"), label="Stop Loss Type").classes("flex-1")
                         ad_sl = ui.number("Stop Loss Value", value=ad_cfg["sl"], min=0, step=1).classes("flex-1")
 
+                    ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
+                                             value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
+                    ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
+                    ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
+                    with ui.row().classes("w-full gap-2 no-wrap items-center"):
+                        ad_trail_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("trail_type", "LTP"), label="Trail Type").classes("flex-1")
+                        ad_trail_trigger = ui.number("Trail Trigger", value=ad_cfg.get("trail_trigger", 20), min=0, step=1).classes("flex-1")
+                        ad_trail_point = ui.number("Trail Point", value=ad_cfg.get("trail_point", 1), min=0, step=1).classes("flex-1")
+                        ad_trail_gap = ui.number("Trail Gap", value=ad_cfg.get("trail_gap", 20), min=0, step=1).classes("flex-1")
+                    for _w in (ad_trail_type, ad_trail_trigger, ad_trail_point, ad_trail_gap):
+                        _w.bind_enabled_from(ad_trail, "value")
+
                     ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
                     ad_status = ui.label("")
+                    plan_label = ui.label(mon.plan_text()).classes("text-sm text-indigo-8")
+                    side_lock_label = ui.label(mon.side_status_text()).classes("text-sm font-medium text-indigo-8")
 
                     ad_template.on_value_change(lambda ev: ad_confirm.set_value(False))
 
@@ -417,7 +509,22 @@ def main_page():
                             return None, "Target and SL must be numbers above 0."
                         if qty is None or qty < 1 or qty != int(qty):
                             return None, "Quantity must be a whole number of at least 1."
-                        return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value}, ""
+                        max_above = num(ad_max_above.value)
+                        if max_above is None or max_above <= 0:
+                            return None, "Max points above BEP must be a number above 0."
+                        trail = bool(ad_trail.value)
+                        t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
+                        if trail:
+                            if None in (t_trig, t_point, t_gap) or t_trig <= 0 or t_point <= 0 or t_gap <= 0:
+                                return None, "Trail Trigger, Trail Point and Trail Gap must be numbers above 0."
+                            if ad_trail_type.value == "POINT" and t_gap >= t_trig:
+                                return None, "With Trail Type POINT, Trail Gap must be smaller than Trail Trigger."
+                        return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
+                                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above,
+                                "trail_type": ad_trail_type.value,
+                                "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
+                                "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
+                                "trail_gap": t_gap if t_gap is not None else ad_cfg.get("trail_gap", 20)}, ""
 
                     def save_auto_order_settings():
                         obj, err = _parse_template()
@@ -433,8 +540,13 @@ def main_page():
                             ad_status.set_text("\u274c The webhook URL must start with https://")
                             return
                         ad_cfg["templates"]["strategy_order"] = obj
+                        update_tpl_tag()
                         ad_cfg.update(webhook_url=url, confirmed=bool(ad_confirm.value), **nums)
+                        trail_txt = (f"trail ON ({nums['trail_type']}: trigger {nums['trail_trigger']}, point {nums['trail_point']}, "
+                                     f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
                         ad_status.set_text(f"\u2705 Saved: target {nums['tgt']} ({nums['tgt_type']}), SL {nums['sl']} ({nums['sl_type']}), qty {nums['qty']}; "
+                                           f"{trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
+                                           f"09:15 order only if LTP is < {nums['max_above_bep']} above BEP; "
                                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                                            f"(live orders need both). Lasts until the app restarts.")
                         log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} AlgoDelta settings saved.")
@@ -523,108 +635,302 @@ def main_page():
                 render_first_cards()
                 render_latest_cards()
 
-            section.set_visibility(config.INDEXES[name]["enabled"])
-            return {"section": section, "ltp_label": ltp_label, "window_label": window_label,
-                    "render_board": render_board, "render_first": render_first_cards,
-                    "render_latest": render_latest_cards, "render_all": render_all}
+            # ---------------------------------------------------------- Common Price Watch (manual trades)
+            cw = watches[name]
+            with ui.card().classes("w-full rounded-xl shadow-md") as cw_card:
+                ui.label(f"{name} \u2014 Common Price Watch").classes("text-md font-bold")
+                ui.label("Manual rows alert when a leg's candle closes ABOVE the common price (crossing up from at or below); "
+                         "red = closed back below after triggering. \u2b50 rows are added automatically for a live first support of "
+                         "the day inside the ATM window (Level = BEP); red when the board row turns red. "
+                         "Nothing is placed automatically: use Place order.").classes("text-xs text-gray-500")
+                with ui.row().classes("items-end gap-4"):
+                    cw_strike = ui.number("Strike", value=(mon.strikes[len(mon.strikes) // 2] if mon.strikes else None),
+                                          step=config.INDEXES[name]["strike_interval"], precision=0).classes("w-32")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Leg").classes("text-xs text-gray-600")
+                        cw_leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
+                    cw_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Timeframe").classes("text-xs text-gray-600")
+                        cw_tf = ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+                    cw_msg = ui.label("").classes("text-sm")
 
-        for _idx in config.INDEXES:
-            panels[_idx] = build_panel(_idx)
-
-        ui.separator()
-        ui.label("AlgoDelta orders \u2014 dry run and live").classes("text-md font-bold")
-        orders_table = ui.table(columns=ORDER_COLUMNS, rows=list(reversed(order_log)), row_key="id").classes("w-full").props("dense")
-        orders_table.add_slot("body-cell-status", '''
-            <q-td key="status" :props="props">
-                <q-badge :color="props.value === 'SENT' ? 'green' : props.value === 'DRY RUN' ? 'blue' : props.value === 'FAILED' ? 'red' : 'orange'">{{ props.value }}</q-badge>
-            </q-td>''')
-        orders_table.add_slot("body-cell-payload", '''
-            <q-td key="payload" :props="props" style="max-width: 420px; white-space: normal; word-break: break-all; font-family: monospace; font-size: 11px">{{ props.value }}</q-td>''')
-        orders_table.add_slot("body-cell-detail", '''
-            <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
-
-        def add_order_row(sig, res):
-            row = {
-                "id": len(order_log), "time": datetime.now().strftime("%H:%M:%S"), "index": sig["index"], "opt": sig["opt"],
-                "strike": sig["strike"], "kind": "Opening candle", "bep": round(float(sig["bep"]), 2),
-                "ltp": round(float(sig["ltp"]), 2),
-                "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
-                "payload": json.dumps(res["payload"]),
-            }
-            order_log.append(row)
-            _save_order_row(row)
-            orders_table.rows = list(reversed(order_log))
-            orders_table.update()
-
-        def download_orders_csv():
-            ui.download(export_utils.build_csv(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.csv")
-
-        def download_orders_xlsx():
-            ui.download(export_utils.build_xlsx(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
-
-        with ui.row().classes("gap-3"):
-            ui.button("Download CSV", on_click=download_orders_csv)
-            ui.button("Download XLSX", on_click=download_orders_xlsx)
-
-        ui.separator()
-        log_area = ui.markdown("")
-
-        async def poll():
-            if not token_connected:
-                status_label.set_text("Status: waiting for valid token")
-                return
-            active = [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]
-            if not active:
-                status_label.set_text("Status: no index selected (tick NIFTY and/or SENSEX at the top)")
-                return
-            if polling["busy"]:
-                return
-            polling["busy"] = True
-            try:
-                ltps, err = await run.io_bound(fetch_index_ltps, active)
-                if market_utils.is_market_open():
-                    status_label.set_text("Status: monitoring " + " + ".join(active))
-                else:
-                    status_label.set_text(f"Status: market closed (Mon\u2013Fri {config.MARKET_OPEN}\u2013{config.MARKET_CLOSE} IST)")
-
-                for name in active:
-                    if not config.INDEXES[name]["enabled"]:
-                        continue
-                    ltp = ltps.get(name)
-                    if ltp is None:
-                        log(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {name} LTP unavailable ({err})")
-                        continue
-                    p, mon = panels[name], monitors[name]
-                    p["ltp_label"].set_text(f"{name} LTP: {ltp}")
-
+                def add_watch():
+                    step = config.INDEXES[name]["strike_interval"]
                     try:
-                        res = await run.io_bound(mon.step, client, ltp, None, datetime.now(market_utils.IST))
-                        for msg in res["logs"]:
-                            log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
-                        if mon.strikes:
-                            p["window_label"].set_text(f"Window: {min(mon.strikes)} - {max(mon.strikes)}")
-                        if res["board_changed"] or res["recalculated"]:
-                            p["render_board"]()
-                        if res.get("first_updated"):
-                            p["render_first"]()
-                        if res.get("latest_updated"):
-                            p["render_latest"]()
-                        support_alerts = mon.pop_support_alerts()
-                        if support_alerts:
-                            notifier.dispatch_support_alerts(support_alerts, log_fn=log)
-                        
-                        for sig in mon.pop_order_signals():
-                            res = await run.io_bound(order_bridge.send_order, sig)
-                            log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
-                            add_order_row(sig, res)
-                            ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
-                                      position="top", timeout=15000)
-                    except Exception as ex:
-                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
-            finally:
-                polling["busy"] = False
+                        strike, price = int(cw_strike.value), float(cw_price.value)
+                    except (TypeError, ValueError):
+                        cw_msg.set_text("\u274c Enter a strike and a common price.")
+                        return
+                    if strike <= 0 or strike % step or price <= 0:
+                        cw_msg.set_text(f"\u274c Strike must be a multiple of {step}; common price above 0.")
+                        return
+                    rows = cw.add(strike, cw_leg.value, price, int(cw_tf.value), datetime.now(market_utils.IST))
+                    cw_msg.set_text(f"\u2705 Watching {strike} {cw_leg.value} at {price:g} ({cw_tf.value} min).")
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} common price watch added: "
+                        + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
+                    render_watch.refresh()
 
-        scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
+                ui.button("Add", icon="add", on_click=add_watch).props("dense")
+
+                async def place_watch_order(row_id):
+                    r = cw.get(row_id)
+                    if not r or r["status"] != "triggered" or r["order_status"] in ("SENT", "DRY RUN"):
+                        return
+                    sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
+                           "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
+                           "expiry": mon.expiry, "order_type": "strategy_order",
+                           "kind": "star" if r.get("source") == "star" else "common",
+                           "kind_label": "Manual \u2014 \u2b50 support" if r.get("source") == "star" else "Manual \u2014 common price",
+                           "time": datetime.now().strftime("%H:%M:%S")}
+                    cw.set_order_status(row_id, "sending")
+                    render_watch.refresh()
+                    res = await run.io_bound(order_bridge.send_order, sig)
+                    status = ORDER_STATUS.get(res["status"], res["status"])
+                    cw.set_order_status(row_id, status)
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
+                    with cw_card:                   # the clicked button was redrawn away; use the card as context
+                        add_order_row(sig, res)
+                        ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                                  position="top", timeout=15000)
+                        render_watch.refresh()
+
+                def delete_watch(row_id):
+                    cw.remove(row_id)
+                    render_watch.refresh()
+
+                @ui.refreshable
+                def render_watch():
+                    if not cw.rows:
+                        ui.label("No strikes watched yet.").classes("text-sm text-gray-500")
+                        return
+                    with ui.grid(columns="80px 90px 50px 110px 60px 130px 1fr 220px").classes("w-full items-center gap-x-3 gap-y-1"):
+                        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", ""):
+                            ui.label(head).classes("text-xs font-bold text-gray-600")
+                        for r in cw.rows:
+                            bg = {"triggered": "bg-green-2", "failed": "bg-red-2"}.get(r["status"], "")
+                            src = f"\u2b50 {r['trig_time']}" if r.get("source") == "star" else "Manual"
+                            cells = [src, str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
+                                     (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
+                                     CommonWatch.status_text(r)]
+                            for txt in cells:
+                                ui.label(txt).classes(f"text-sm px-1 py-1 {bg}")
+                            with ui.row().classes("gap-1 no-wrap"):
+                                done = r["order_status"] in ("SENT", "DRY RUN", "sending")
+                                btn = ui.button("Ordered (" + r["order_status"] + ")" if done else "Place order",
+                                                on_click=lambda _e, i=r["id"]: place_watch_order(i)).props("dense size=sm color=green")
+                                btn.set_enabled(r["status"] == "triggered" and not done)
+                                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: delete_watch(i)) \
+                                    .props("dense flat size=sm color=grey-7")
+
+                render_watch()
+
+            section.set_visibility(config.INDEXES[name]["enabled"])
+            return {"section": section, "render_watch": render_watch.refresh, "ltp_label": ltp_label, "window_label": window_label,
+                    "render_board": render_board, "render_first": render_first_cards,
+                    "render_latest": render_latest_cards, "render_all": render_all,
+                    "render_locks": lambda: (side_lock_label.set_text(mon.side_status_text()),
+                                             plan_label.set_text(mon.plan_text()))}
+
+    for _idx in config.INDEXES:
+        panels[_idx] = build_panel(_idx)
+
+    ui.separator()
+    ui.label("AlgoDelta orders \u2014 dry run and live").classes("text-md font-bold")
+    orders_table = ui.table(columns=ORDER_COLUMNS, rows=list(reversed(order_log)), row_key="id").classes("w-full").props("dense")
+    orders_table.add_slot("body-cell-status", '''
+        <q-td key="status" :props="props">
+            <q-badge :color="props.value === 'SENT' ? 'green' : props.value === 'DRY RUN' ? 'blue' : props.value === 'FAILED' ? 'red' : 'orange'">{{ props.value }}</q-badge>
+        </q-td>''')
+    for _col in ("points", "pnl"):                    # green when >= 0, red when < 0
+        orders_table.add_slot(f"body-cell-{_col}", f'''
+        <q-td key="{_col}" :props="props" :class="typeof props.value === 'number' ? (props.value >= 0 ? 'text-green-8 text-weight-bold' : 'text-red-8 text-weight-bold') : ''">{{{{ props.value }}}}</q-td>''')
+    orders_table.add_slot("body-cell-detail", '''
+        <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
+
+    def add_order_row(sig, res):
+        row = {
+            "id": len(order_log), "time": datetime.now().strftime("%H:%M:%S"), "index": sig["index"], "opt": sig["opt"],
+            "strike": sig["strike"], "kind": sig.get("kind_label", "Opening candle"), "bep": round(float(sig["bep"]), 2),
+            "ltp": round(float(sig["ltp"]), 2),
+            "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
+            "payload": json.dumps(res["payload"]),
+            "expiry": sig.get("expiry") or "", "qty": config.AUTO_ORDER[sig["index"]]["qty"],
+            "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
+        }
+        order_log.append(row)
+        _save_order_row(row)
+        orders_table.rows = list(reversed(order_log))
+        orders_table.update()
+
+    def download_orders_csv():
+        ui.download(export_utils.build_csv(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.csv")
+
+    def download_orders_xlsx():
+        ui.download(export_utils.build_xlsx(list(order_log), ORDER_EXPORT_COLUMNS), f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+
+    with ui.row().classes("gap-3"):
+        ui.button("Download CSV", on_click=download_orders_csv)
+        ui.button("Download XLSX", on_click=download_orders_xlsx)
+
+    ui.separator()
+    log_area = ui.markdown("")
+
+    async def poll():
+        if not token_connected:
+            status_label.set_text("Status: waiting for valid token")
+            return
+        active = [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]
+        if not active:
+            status_label.set_text("Status: no index selected (tick NIFTY at the top)")
+            return
+        if polling["busy"]:
+            return
+        polling["busy"] = True
+        try:
+            ltps, err = await run.io_bound(fetch_index_ltps, active)
+            if market_utils.is_market_open():
+                status_label.set_text("Status: monitoring " + " + ".join(active))
+            else:
+                status_label.set_text(f"Status: market closed (Mon\u2013Fri {config.MARKET_OPEN}\u2013{config.MARKET_CLOSE} IST)")
+
+            for name in active:
+                if not config.INDEXES[name]["enabled"]:
+                    continue
+                ltp = ltps.get(name)
+                if ltp is None:
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] ERROR: {name} LTP unavailable ({err})")
+                    continue
+                p, mon = panels[name], monitors[name]
+                p["ltp_label"].set_text(f"{name} LTP: {ltp}")
+
+                try:
+                    res = await run.io_bound(mon.step, client, ltp, None, datetime.now(market_utils.IST))
+                    for msg in res["logs"]:
+                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}")
+                    if mon.strikes:
+                        p["window_label"].set_text(f"Window: {min(mon.strikes)} - {max(mon.strikes)}")
+                    if res["board_changed"] or res["recalculated"]:
+                        p["render_board"]()
+                    if res.get("first_updated"):
+                        p["render_first"]()
+                    if res.get("latest_updated"):
+                        p["render_latest"]()
+                    support_alerts = mon.pop_support_alerts()
+                    if support_alerts:
+                        notifier.dispatch_support_alerts(support_alerts, log_fn=log)
+                    star_added = add_star_rows(name, support_alerts)
+                    star_failed = watches[name].sync_star_failures(mon.support)
+                    if star_added or star_failed:
+                        p["render_watch"]()
+
+                    now_ist = datetime.now(market_utils.IST)
+                    rows_before = [(r["id"], r["status"], r["last_time"]) for r in watches[name].rows]
+                    fired = await run.io_bound(watches[name].step, client, mon.expiry, now_ist)
+                    for r in fired:
+                        notifier.dispatch_common_alert(r, log_fn=log, market_open=market_utils.is_market_open(now_ist))
+                    if fired or rows_before != [(r["id"], r["status"], r["last_time"]) for r in watches[name].rows]:
+                        p["render_watch"]()
+                    
+                    await dispatch_orders(name)
+                except Exception as ex:
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
+            await refresh_order_tracking()
+        finally:
+            polling["busy"] = False
+
+    def add_star_rows(name, events) -> bool:
+        """Auto-adds live \u2b50 supports (inside that candle's ATM window) to the Common Price Watch.
+        A 09:15-candle \u2b50 is skipped when that side already has its 09:15 opening order."""
+        mon, cw, added = monitors[name], watches[name], False
+        for e in events or []:
+            stamp = datetime.now().strftime("%H:%M:%S")
+            if not e.get("in_window"):
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at {e['time']} not added to watch (outside ATM window).")
+                continue
+            if e["time"] == "09:15" and (e.get("day"), e["opt"]) in mon.side_lock:
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at 09:15 not added to watch "
+                    f"({e['opt']} already has its 09:15 opening order).")
+                continue
+            if cw.add_star(e):
+                added = True
+                log(f"[{stamp}] {name} \u2b50 {e['strike']}{e['opt']} at {e['time']} added to watch "
+                    f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")
+        return added
+
+    async def dispatch_orders(name):
+        """Sends every queued order signal of this index right away and records the result."""
+        mon, p = monitors[name], panels[name]
+        for sig in mon.pop_order_signals():
+            res = await run.io_bound(order_bridge.send_order, sig)
+            mon.record_order_result(sig, res["status"])
+            log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
+            add_order_row(sig, res)
+            ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                      position="top", timeout=15000)
+        p["render_locks"]()
+
+    opening = {"busy": False}
+
+    async def opening_loop():
+        """Runs every OPENING_TICK_SECONDS. Prep window (OPENING_PREP_START-09:15): read NIFTY's pre-open price and
+        prepare the strikes/BEPs. 09:15:00-09:20: check only the prepared strikes and send at once."""
+        if not token_connected or opening["busy"]:
+            return
+        now = datetime.now(market_utils.IST)
+        h, m = (int(x) for x in config.OPENING_PREP_START.split(":"))
+        start, first, end = now.replace(hour=h, minute=m, second=0, microsecond=0), \
+            now.replace(hour=9, minute=15, second=0, microsecond=0), now.replace(hour=9, minute=20, second=0, microsecond=0)
+        if not (start <= now < end) or not market_utils.is_trading_day(now):
+            return
+        opening["busy"] = True
+        try:
+            for name in [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]:
+                mon, msgs = monitors[name], []
+                try:
+                    if now < first:
+                        ltps, err = await run.io_bound(fetch_index_ltps, [name])
+                        if ltps.get(name) is not None:
+                            await run.io_bound(mon.prepare_opening, client, ltps[name], now, msgs.append)
+                    else:
+                        await run.io_bound(mon.opening_tick, client, now, msgs.append)
+                except Exception as ex:
+                    msgs.append(f"{name} opening order error: {ex}")
+                stamp = datetime.now().strftime("%H:%M:%S")
+                for msg in msgs:
+                    log(f"[{stamp}] {msg}")
+                await dispatch_orders(name)
+        finally:
+            opening["busy"] = False
+
+    async def refresh_order_tracking():
+        """Entry / Exit / LTP / Captured Points / P&L for SENT and DRY RUN rows in the orders table."""
+        if not any(r.get("status") in trade_tracker.TRACKED for r in order_log):
+            return
+        trades, t_err = None, None
+        now_ts = datetime.now().timestamp()
+        has_sent = any(r.get("status") == "SENT" for r in order_log)
+        if has_sent and now_ts - polling["trades_at"] >= config.TRADES_REFRESH_SECONDS:
+            trades, t_err = await run.io_bound(client.fetch_trades_for_day)
+            polling["trades_at"] = now_ts
+            if trades is None:
+                log(f"[{datetime.now().strftime('%H:%M:%S')}] Upstox trade book unavailable ({t_err}); Entry/Exit not updated.")
+        expiries = {n: monitors[n].expiry for n in monitors}
+        try:
+            updates, err = await run.io_bound(trade_tracker.compute, client, order_log, expiries, trades)
+        except Exception as ex:
+            log(f"[{datetime.now().strftime('%H:%M:%S')}] Order tracking error: {ex}")
+            return
+        if not updates:
+            return
+        for r in order_log:
+            if r["id"] in updates:
+                r.update(updates[r["id"]])
+        orders_table.rows = list(reversed(order_log))
+        orders_table.update()
+
+    scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
+    ui.timer(config.OPENING_TICK_SECONDS, opening_loop)
 
 
-ui.run(title="BEP Support Monitor", port=8082, reload=False)
+ui.run(title="BEP Support Monitor", port=8083, reload=False)

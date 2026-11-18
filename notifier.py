@@ -27,3 +27,18 @@ def dispatch_support_alerts(events: list, log_fn=print):
                 new Notification({(e.get('index', 'NIFTY') + " BEP Support " + e['opt'])!r}, {{ body: {label!r} }});
             }}
         """)
+
+def dispatch_common_alert(r: dict, log_fn=print, market_open: bool = True):
+    """Toast + browser notification when a Common Price Watch leg closes above its common price."""
+    label = (f"{r['index']} {r['strike']}{r['opt']} closed above common price {r['price']:g}: "
+             f"close {r['trig_close']:.2f} at {r['trig_time']} ({r['tf']} min). Use Place order to trade.")
+    log_fn(f"COMMON PRICE: {label}")
+    if config.ALERTS_PAUSED or not market_open:
+        log_fn("Common price alert not shown (alerts paused or market closed).")
+        return
+    ui.notify(label, type="positive", position="top", timeout=15000)
+    ui.run_javascript(f"""
+        if (Notification.permission === "granted") {{
+            new Notification({(r['index'] + " Common Price " + str(r['strike']) + r['opt'])!r}, {{ body: {label!r} }});
+        }}
+    """)
