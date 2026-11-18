@@ -16,8 +16,12 @@ import market_utils
 import export_utils
 import bep
 from bep_monitor import BepMonitor
+from common_watch import CommonWatch
 
 monitors = {name: BepMonitor(name) for name in config.INDEXES}
+watches = {name: CommonWatch(name) for name in config.INDEXES}     # Common Price Watch, one per index
+for _w in watches.values():
+    _w.load()
 client = upstox_client.UpstoxClient(config.UPSTOX_ACCESS_TOKEN)
 
 log_lines = []
@@ -631,8 +635,94 @@ def main_page():
                 render_first_cards()
                 render_latest_cards()
 
+            # ---------------------------------------------------------- Common Price Watch (manual trades)
+            cw = watches[name]
+            with ui.card().classes("w-full rounded-xl shadow-md") as cw_card:
+                ui.label(f"{name} \u2014 Common Price Watch").classes("text-md font-bold")
+                ui.label("Alerts when a leg's candle closes ABOVE the common price (crossing up from at or below). "
+                         "Nothing is placed automatically: use Place order. Red = closed back below after triggering."
+                         ).classes("text-xs text-gray-500")
+                with ui.row().classes("items-end gap-4"):
+                    cw_strike = ui.number("Strike", value=(mon.strikes[len(mon.strikes) // 2] if mon.strikes else None),
+                                          step=config.INDEXES[name]["strike_interval"], precision=0).classes("w-32")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Leg").classes("text-xs text-gray-600")
+                        cw_leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
+                    cw_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                    with ui.column().classes("gap-0"):
+                        ui.label("Timeframe").classes("text-xs text-gray-600")
+                        cw_tf = ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+                    cw_msg = ui.label("").classes("text-sm")
+
+                def add_watch():
+                    step = config.INDEXES[name]["strike_interval"]
+                    try:
+                        strike, price = int(cw_strike.value), float(cw_price.value)
+                    except (TypeError, ValueError):
+                        cw_msg.set_text("\u274c Enter a strike and a common price.")
+                        return
+                    if strike <= 0 or strike % step or price <= 0:
+                        cw_msg.set_text(f"\u274c Strike must be a multiple of {step}; common price above 0.")
+                        return
+                    rows = cw.add(strike, cw_leg.value, price, int(cw_tf.value), datetime.now(market_utils.IST))
+                    cw_msg.set_text(f"\u2705 Watching {strike} {cw_leg.value} at {price:g} ({cw_tf.value} min).")
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} common price watch added: "
+                        + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
+                    render_watch.refresh()
+
+                ui.button("Add", icon="add", on_click=add_watch).props("dense")
+
+                async def place_watch_order(row_id):
+                    r = cw.get(row_id)
+                    if not r or r["status"] != "triggered" or r["order_status"] in ("SENT", "DRY RUN"):
+                        return
+                    sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
+                           "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
+                           "expiry": mon.expiry, "order_type": "strategy_order", "kind": "common",
+                           "kind_label": "Manual \u2014 common price", "time": datetime.now().strftime("%H:%M:%S")}
+                    cw.set_order_status(row_id, "sending")
+                    render_watch.refresh()
+                    res = await run.io_bound(order_bridge.send_order, sig)
+                    status = ORDER_STATUS.get(res["status"], res["status"])
+                    cw.set_order_status(row_id, status)
+                    log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
+                    with cw_card:                   # the clicked button was redrawn away; use the card as context
+                        add_order_row(sig, res)
+                        ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                                  position="top", timeout=15000)
+                        render_watch.refresh()
+
+                def delete_watch(row_id):
+                    cw.remove(row_id)
+                    render_watch.refresh()
+
+                @ui.refreshable
+                def render_watch():
+                    if not cw.rows:
+                        ui.label("No strikes watched yet.").classes("text-sm text-gray-500")
+                        return
+                    with ui.grid(columns="90px 50px 110px 60px 130px 1fr 220px").classes("w-full items-center gap-x-3 gap-y-1"):
+                        for head in ("Strike", "Type", "Common price", "TF", "Last close", "Status", ""):
+                            ui.label(head).classes("text-xs font-bold text-gray-600")
+                        for r in cw.rows:
+                            bg = {"triggered": "bg-green-2", "failed": "bg-red-2"}.get(r["status"], "")
+                            cells = [str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
+                                     (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
+                                     CommonWatch.status_text(r)]
+                            for txt in cells:
+                                ui.label(txt).classes(f"text-sm px-1 py-1 {bg}")
+                            with ui.row().classes("gap-1 no-wrap"):
+                                done = r["order_status"] in ("SENT", "DRY RUN", "sending")
+                                btn = ui.button("Ordered (" + r["order_status"] + ")" if done else "Place order",
+                                                on_click=lambda _e, i=r["id"]: place_watch_order(i)).props("dense size=sm color=green")
+                                btn.set_enabled(r["status"] == "triggered" and not done)
+                                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: delete_watch(i)) \
+                                    .props("dense flat size=sm color=grey-7")
+
+                render_watch()
+
             section.set_visibility(config.INDEXES[name]["enabled"])
-            return {"section": section, "ltp_label": ltp_label, "window_label": window_label,
+            return {"section": section, "render_watch": render_watch.refresh, "ltp_label": ltp_label, "window_label": window_label,
                     "render_board": render_board, "render_first": render_first_cards,
                     "render_latest": render_latest_cards, "render_all": render_all,
                     "render_locks": lambda: (side_lock_label.set_text(mon.side_status_text()),
@@ -657,7 +747,7 @@ def main_page():
     def add_order_row(sig, res):
         row = {
             "id": len(order_log), "time": datetime.now().strftime("%H:%M:%S"), "index": sig["index"], "opt": sig["opt"],
-            "strike": sig["strike"], "kind": "Opening candle", "bep": round(float(sig["bep"]), 2),
+            "strike": sig["strike"], "kind": sig.get("kind_label", "Opening candle"), "bep": round(float(sig["bep"]), 2),
             "ltp": round(float(sig["ltp"]), 2),
             "status": ORDER_STATUS.get(res["status"], res["status"]), "detail": res["detail"],
             "payload": json.dumps(res["payload"]),
@@ -725,6 +815,14 @@ def main_page():
                     support_alerts = mon.pop_support_alerts()
                     if support_alerts:
                         notifier.dispatch_support_alerts(support_alerts, log_fn=log)
+
+                    now_ist = datetime.now(market_utils.IST)
+                    rows_before = [(r["id"], r["status"], r["last_time"]) for r in watches[name].rows]
+                    fired = await run.io_bound(watches[name].step, client, mon.expiry, now_ist)
+                    for r in fired:
+                        notifier.dispatch_common_alert(r, log_fn=log, market_open=market_utils.is_market_open(now_ist))
+                    if fired or rows_before != [(r["id"], r["status"], r["last_time"]) for r in watches[name].rows]:
+                        p["render_watch"]()
                     
                     await dispatch_orders(name)
                 except Exception as ex:

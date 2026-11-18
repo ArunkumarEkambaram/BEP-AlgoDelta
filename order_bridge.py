@@ -83,6 +83,8 @@ def build_payload(sig: dict, template: dict = None, params: dict = None) -> dict
 
 def _describe(sig: dict) -> str:
     head = f"{sig['index']} {sig['opt']} {sig['strike']}"
+    if sig.get("kind") == "common":
+        return f"{head} [manual, common price {sig['bep']:g}] (last close {sig['ltp']:.2f})"
     return f"{head} [opening candle] (BEP {sig['bep']:.2f}, LTP {sig['ltp']:.2f})"
 
 
