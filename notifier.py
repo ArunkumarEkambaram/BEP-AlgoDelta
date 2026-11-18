@@ -11,5 +11,11 @@ def support_label(e: dict) -> str:
 
 
 def common_label(r: dict) -> str:
+    if r.get("kind") == "pair":
+        opp = "PE" if r["opt"] == "CE" else "CE"
+        line = (r["pe_price"] if r["opt"] == "CE" else r["ce_price"]) - r["buffer"]
+        return (f"{r['index']} PAIR {r['ce_strike']}CE/{r['pe_strike']}PE: {r['strike']}{r['opt']} closed above "
+                f"{r['price']:g} (close {r['trig_close']:.2f} at {r['trig_time']}, {r['tf']} min) with {opp} below "
+                f"{line:g}. Use Place order to trade.")
     return (f"{r['index']} {r['strike']}{r['opt']} closed above common price {r['price']:g}: "
             f"close {r['trig_close']:.2f} at {r['trig_time']} ({r['tf']} min). Use Place order to trade.")

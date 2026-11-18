@@ -359,29 +359,87 @@ def section(title, icon, rows, empty_text, place, name):
                     .props("dense flat size=sm color=grey-6")
 
 
+def pair_section(rows, place, name):
+    """Pair rows: CE strike vs PE strike around a common price."""
+    card_title(f"Pairs \u2014 CE vs PE ({len(rows)})", "compare_arrows")
+    if not rows:
+        ui.label("No pairs yet - choose 'Pair (CE vs PE)' above.").classes("text-sm opacity-70")
+        return
+    with ui.grid(columns="260px 70px 60px 190px 1fr 230px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", ""):
+            ui.label(head).classes("stat-label")
+        for r in rows:
+            bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2",
+                  "exited": "bg-red-10 text-red-2"}.get(r["status"], "")
+            lc = r["legs"]["CE"].get("last_close"), r["legs"]["PE"].get("last_close")
+            closes = " \u00b7 ".join(f"{v:.2f}" if v is not None else "--" for v in lc)
+            for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}", f"{r['tf']} min", closes, CommonWatch.status_text(r)):
+                ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            with ui.row().classes("gap-1 no-wrap"):
+                done = r["order_status"] in ("SENT", "DRY RUN", "sending")
+                text = f"Ordered {r['opt']} ({r['order_status']})" if done else \
+                    (f"Place order {r['opt']}" if r["status"] == "triggered" else "Place order")
+                b = ui.button(text, on_click=lambda _e, i=r["id"]: place(i)).props("dense size=sm color=green")
+                b.set_enabled(r["status"] == "triggered" and not done)
+                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: engine.remove_watch(name, i)) \
+                    .props("dense flat size=sm color=grey-6")
+
+
 def watch_page():
     ui.label("Order Management").classes("text-2xl font-bold")
-    ui.label("Manual rows alert when a leg's candle closes ABOVE the common price (crossing up from at or below); red = "
-             "closed back below after triggering. ⭐ rows are added automatically for a live first support of the day "
+    ui.label("Same strike: alerts when a leg's candle closes ABOVE the common price (crossing up from at or below); red = "
+             "closed back below after triggering. Pair: a leg closes above its price while the opponent closes below "
+             "price \u2212 buffer; after you order, the opponent closing back at or above that line squares off the "
+             "position (live) or records the exit (dry run). ⭐ rows are added automatically for a live first support of the day "
              "inside the ATM window (Level = BEP); red when the board row turns red. Nothing is placed automatically: "
              "use Place order.").classes("text-xs opacity-70")
     for name in engine.active():
         mon, cw = engine.monitors[name], engine.watches[name]
         with ui.card().classes("w-full"):
-            card_title(f"{name} — add a strike", "add_circle")
-            with ui.row().classes("items-end gap-6"):
-                cw_strike = ui.number("Strike", value=(mon.strikes[len(mon.strikes) // 2] if mon.strikes else None),
-                                      step=config.INDEXES[name]["strike_interval"], precision=0).classes("w-32")
+            card_title(f"{name} \u2014 add", "add_circle")
+            mode = ui.toggle({"same": "Same strike", "pair": "Pair (CE vs PE)"}, value="same").props("dense no-caps")
+            centre = mon.strikes[len(mon.strikes) // 2] if mon.strikes else None
+            with ui.row().classes("items-end gap-6") as same_row:
+                cw_strike = ui.number("Strike", value=centre, step=config.INDEXES[name]["strike_interval"],
+                                      precision=0).classes("w-32")
                 with ui.column().classes("gap-0"):
                     ui.label("Leg").classes("text-xs opacity-70")
                     cw_leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
                 cw_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+            with ui.row().classes("items-end gap-6") as pair_row:
+                p_ce = ui.number("CE strike", value=centre, step=config.INDEXES[name]["strike_interval"],
+                                 precision=0).classes("w-32")
+                p_pe = ui.number("PE strike", value=centre, step=config.INDEXES[name]["strike_interval"],
+                                 precision=0).classes("w-32")
+                p_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                p_pe_price = ui.number("PE price (if different)", value=None, min=0, step=0.05).classes("w-44")
+                p_buffer = ui.number("Buffer (opponent below price \u2212 buffer)", value=1, min=0, step=0.05) \
+                    .classes("w-64")
+            same_row.bind_visibility_from(mode, "value", lambda v: v == "same")
+            pair_row.bind_visibility_from(mode, "value", lambda v: v == "pair")
+            with ui.row().classes("items-end gap-6"):
                 with ui.column().classes("gap-0"):
                     ui.label("Timeframe").classes("text-xs opacity-70")
                     cw_tf = ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
 
-                def add_watch(name=name, cw_strike=cw_strike, cw_leg=cw_leg, cw_price=cw_price, cw_tf=cw_tf):
+                def add_watch(name=name, mode=mode, cw_strike=cw_strike, cw_leg=cw_leg, cw_price=cw_price, cw_tf=cw_tf,
+                              p_ce=p_ce, p_pe=p_pe, p_price=p_price, p_pe_price=p_pe_price, p_buffer=p_buffer):
                     step = config.INDEXES[name]["strike_interval"]
+                    if mode.value == "pair":
+                        try:
+                            ce, pe, price = int(p_ce.value), int(p_pe.value), float(p_price.value)
+                            pe_price = float(p_pe_price.value) if p_pe_price.value else price
+                            buffer = float(p_buffer.value or 0)
+                        except (TypeError, ValueError):
+                            ui.notify("Enter the CE strike, PE strike and common price.", type="negative")
+                            return
+                        if min(ce, pe) <= 0 or ce % step or pe % step or price <= 0 or pe_price <= 0 or buffer < 0:
+                            ui.notify(f"Strikes must be multiples of {step}; prices above 0; buffer 0 or more.",
+                                      type="negative")
+                            return
+                        engine.add_pair(name, ce, pe, price, pe_price, buffer, int(cw_tf.value))
+                        ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}.", type="positive")
+                        return
                     try:
                         strike, price = int(cw_strike.value), float(cw_price.value)
                     except (TypeError, ValueError):
@@ -404,10 +462,13 @@ def watch_page():
             def render(cw=cw, holder=holder, place=place, name=name):
                 holder.clear()
                 with holder:
-                    manual = [r for r in cw.rows if r.get("source") != "star"]
+                    manual = [r for r in cw.rows if r.get("source") not in ("star", "pair")]
+                    pairs = [r for r in cw.rows if r.get("source") == "pair"]
                     stars = [r for r in cw.rows if r.get("source") == "star"]
                     section(f"Common Price ({len(manual)})", "price_change", manual,
                             "No common price strikes yet - add one above.", place, name)
+                    ui.separator().classes("my-3")
+                    pair_section(pairs, place, name)
                     ui.separator().classes("my-3")
                     section(f"BEP Support \u2b50 ({len(stars)})", "star", stars,
                             "No \u2b50 yet - live first supports inside the ATM window appear here automatically.",
