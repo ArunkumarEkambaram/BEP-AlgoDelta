@@ -26,7 +26,7 @@ from common_watch import CommonWatch
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
-                      "expiry", "qty"]
+                      "expiry", "qty", "exit", "exit_time", "exit_reason"]
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
 
@@ -138,6 +138,23 @@ class Engine:
                 w.writerow({k: row.get(k, "") for k in fields})
         except OSError:
             pass
+
+    def _rewrite_orders_file(self):
+        """Rewrites today's orders file (used when a dry-run exit is found, so it survives a restart)."""
+        try:
+            path = self._orders_file()
+            tmp = path + ".tmp"
+            with open(tmp, "w", newline="", encoding="utf-8") as f:
+                w = csv.DictWriter(f, fieldnames=ORDER_FILE_COLUMNS, extrasaction="ignore")
+                w.writeheader()
+                for r in self.order_log:
+                    row = {k: r.get(k, "") for k in ORDER_FILE_COLUMNS}
+                    if r.get("status") != "DRY RUN":       # live exits always come from Upstox
+                        row.update(exit="", exit_time="", exit_reason="")
+                    w.writerow(row)
+            os.replace(tmp, path)
+        except OSError as ex:
+            self.log(f"Could not update the orders file ({ex}).")
 
     def add_order_row(self, sig, res):
         import json
@@ -426,9 +443,19 @@ class Engine:
             self.log(f"Order tracking error: {ex}")
             return
         if updates:
+            new_exits = []
             for r in self.order_log:
                 if r["id"] in updates:
-                    r.update(updates[r["id"]])
+                    u = updates[r["id"]]
+                    if u.pop("exit_new", False):
+                        u["detail"] = f"{r.get('detail', '')} | Exit: {u['exit_reason']} {u['exit_time']}".strip(" |")
+                        new_exits.append(r)
+                    r.update(u)
+            for r in new_exits:
+                self.log(f"DRY RUN {r['index']} {r['opt']} {r['strike']}: simulated exit {r['exit_reason']} at "
+                         f"{r['exit_time']}, price {r['exit']} -> {r['points']} points, P&L {r['pnl']}")
+            if new_exits:
+                self._rewrite_orders_file()
             self.bump("orders")
 
 

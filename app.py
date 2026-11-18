@@ -438,9 +438,10 @@ def orders_page():
             <q-td key="{col}" :props="props" :class="typeof props.value === 'number' ? (props.value >= 0 ? 'text-green-6 text-weight-bold' : 'text-red-6 text-weight-bold') : ''">{{{{ props.value }}}}</q-td>''')
         table.add_slot("body-cell-detail", '''
             <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
-    ui.label("Entry / Exit of SENT orders are the real fills from today's Upstox trade book (refreshed every "
-             f"{config.TRADES_REFRESH_SECONDS} s). Captured Points = Exit − Entry, shown once the trade has exited. "
-             "DRY RUN rows have no exit.").classes("text-xs opacity-70")
+    ui.label("LIVE (SENT) orders: Entry / Exit are the real fills from today's Upstox trade book (refreshed every "
+             f"{config.TRADES_REFRESH_SECONDS} s). DRY RUN orders: Entry = LTP at the signal; Exit is simulated from "
+             "1-minute candles with the order's Target / SL / trailing SL (SL first if both hit in one minute; "
+             "closed at 15:15 if still open). Captured Points = Exit \u2212 Entry.").classes("text-xs opacity-70")
 
     def render():
         table.rows = list(reversed(engine.order_log))
@@ -648,8 +649,8 @@ def algodelta_card(name):
         if trail:
             if None in (t_trig, t_point, t_gap) or t_trig <= 0 or t_point <= 0 or t_gap <= 0:
                 return None, "Trail Trigger, Point and Gap must be numbers above 0."
-            if ad_trail_type.value == "POINT" and t_gap >= t_trig:
-                return None, "With Trail type POINT, Gap must be smaller than Trigger."
+            if t_gap > t_trig:
+                return None, "Gap must not be larger than Trigger (Gap = Trigger moves the SL to cost at the trigger)."
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above,
                 "trail_type": ad_trail_type.value,
