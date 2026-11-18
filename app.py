@@ -333,6 +333,32 @@ def support_page():
 
 
 # ====================================================================== Order Management (common price + stars)
+def section(title, icon, rows, empty_text, place, name):
+    """One block of Order Management rows (Common Price or BEP Support \u2b50)."""
+    card_title(title, icon)
+    if not rows:
+        ui.label(empty_text).classes("text-sm opacity-70")
+        return
+    with ui.grid(columns="90px 80px 50px 100px 60px 140px 1fr 230px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", ""):
+            ui.label(head).classes("stat-label")
+        for r in rows:
+            bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
+            src = f"\u2b50 {r['trig_time']}" if r.get("source") == "star" else "Manual"
+            cells = [src, str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
+                     (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
+                     CommonWatch.status_text(r)]
+            for txt in cells:
+                ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            with ui.row().classes("gap-1 no-wrap"):
+                done = r["order_status"] in ("SENT", "DRY RUN", "sending")
+                b = ui.button(f"Ordered ({r['order_status']})" if done else "Place order",
+                              on_click=lambda _e, i=r["id"]: place(i)).props("dense size=sm color=green")
+                b.set_enabled(r["status"] == "triggered" and not done)
+                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: engine.remove_watch(name, i)) \
+                    .props("dense flat size=sm color=grey-6")
+
+
 def watch_page():
     ui.label("Order Management").classes("text-2xl font-bold")
     ui.label("Manual rows alert when a leg's candle closes ABOVE the common price (crossing up from at or below); red = "
@@ -378,28 +404,14 @@ def watch_page():
             def render(cw=cw, holder=holder, place=place, name=name):
                 holder.clear()
                 with holder:
-                    if not cw.rows:
-                        ui.label("No strikes watched yet.").classes("text-sm opacity-70")
-                        return
-                    with ui.grid(columns="90px 80px 50px 100px 60px 140px 1fr 230px") \
-                            .classes("w-full items-center gap-x-3 gap-y-1"):
-                        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", ""):
-                            ui.label(head).classes("stat-label")
-                        for r in cw.rows:
-                            bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
-                            src = f"⭐ {r['trig_time']}" if r.get("source") == "star" else "Manual"
-                            cells = [src, str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
-                                     (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
-                                     CommonWatch.status_text(r)]
-                            for txt in cells:
-                                ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
-                            with ui.row().classes("gap-1 no-wrap"):
-                                done = r["order_status"] in ("SENT", "DRY RUN", "sending")
-                                b = ui.button(f"Ordered ({r['order_status']})" if done else "Place order",
-                                              on_click=lambda _e, i=r["id"]: place(i)).props("dense size=sm color=green")
-                                b.set_enabled(r["status"] == "triggered" and not done)
-                                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: engine.remove_watch(name, i)) \
-                                    .props("dense flat size=sm color=grey-6")
+                    manual = [r for r in cw.rows if r.get("source") != "star"]
+                    stars = [r for r in cw.rows if r.get("source") == "star"]
+                    section(f"Common Price ({len(manual)})", "price_change", manual,
+                            "No common price strikes yet - add one above.", place, name)
+                    ui.separator().classes("my-3")
+                    section(f"BEP Support \u2b50 ({len(stars)})", "star", stars,
+                            "No \u2b50 yet - live first supports inside the ATM window appear here automatically.",
+                            place, name)
             when_changed(["watch"], render)
 
 
