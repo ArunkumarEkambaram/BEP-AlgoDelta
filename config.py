@@ -58,7 +58,7 @@ SUPPORT_FAIL_WINDOW_CANDLES = 3
 # ---------------------------------------------------------------- ALGO DELTA ORDERS
 AUTO_ORDER_DRY_RUN = True         # "Dry run" checkbox. True = log the JSON only, send nothing.
 AUTO_ORDER_PAUSED = False         # "Pause algo trade" button.
-AUTO_ORDER_DAILY_LIMIT = 20       # "Max orders/day" box: hard cap on LIVE orders per day.
+AUTO_ORDER_DAILY_LIMIT = 5       # "Max orders/day" box: hard cap on LIVE orders per day.
 
 # Per-index AlgoDelta settings. 
 # "tgt_type", "sl_type" and "trail_type" can be "POINT" or "LTP".
@@ -94,10 +94,10 @@ _STRATEGY_ORDER = {
 def _default_auto_order() -> dict:
     return {
         "webhook_url": "", "confirmed": False,
-        "tgt": 50, "sl": 10, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
+        "tgt": 50, "sl": 12, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
         "exit_on_opposite": False,
         "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
-        "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 20,
+        "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 19,
         "templates": {"strategy_order": _copy.deepcopy(_STRATEGY_ORDER)},
     }
 
