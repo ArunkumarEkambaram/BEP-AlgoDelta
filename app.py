@@ -3,7 +3,7 @@ app.py - NiceGUI screens for the BEP Support monitor (single-page app).
 
 Layout: a fixed header (NIFTY LTP, status, connection, Dry run / LIVE, Pause buttons, theme) and a left navigation
 drawer with six pages served by ui.sub_pages (no full page reloads):
-  Dashboard . BEP Support . Common Price Watch . Orders . Setup (once a day) . Logs
+  Dashboard . BEP Support . Order Management . Order Details . Setup (once a day) . Logs
 All trading logic runs once in the background engine (engine.py); pages only read its state and redraw when the
 matching version number changes.
 """
@@ -46,15 +46,15 @@ BEP_EXPORT_COLUMNS = [
     ("bep", "BEP"), ("time", "Support time"), ("setup", "Setup"), ("fail_level", "Fail level"),
     ("status", "Status"), ("fail_time", "Failed at"), ("fail_close", "Fail close"), ("ltp", "LTP"),
 ]
-SUPPORT_GREEN = ("rgb(200,230,201)", "#1b3d1e")
-SUPPORT_RED = ("rgb(255,205,210)", "#7f1d1d")
+SUPPORT_HELD = ("", "")                                   # default table colours (white text in dark mode)
+SUPPORT_RED = ("rgba(239,68,68,0.16)", "#f87171")
 
 NAV = [
     ("/", "space_dashboard", "Dashboard"),
     ("/support", "stacked_line_chart", "BEP Support"),
-    ("/watch", "visibility", "Common Price Watch"),
-    ("/orders", "receipt_long", "Orders"),
-    ("/setup", "tune", "Setup"),
+    ("/order-management", "tune", "Order Management"),
+    ("/order-details", "receipt_long", "Order Details"),
+    ("/setup", "settings", "Setup"),
     ("/logs", "article", "Logs"),
 ]
 
@@ -178,8 +178,8 @@ def root():
         return build
 
     ui.sub_pages({path: page(path, b) for path, b in (
-        ("/", dashboard_page), ("/support", support_page), ("/watch", watch_page),
-        ("/orders", orders_page), ("/setup", setup_page), ("/logs", logs_page))})
+        ("/", dashboard_page), ("/support", support_page), ("/order-management", watch_page),
+        ("/order-details", orders_page), ("/setup", setup_page), ("/logs", logs_page))}).classes("w-full")
 
 
 # ====================================================================== Dashboard
@@ -297,9 +297,9 @@ def support_page():
             ui.download(export_utils.build_xlsx(rows, BEP_EXPORT_COLUMNS),
                         f"bep_support_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
         ui.button("Download XLSX", icon="download", on_click=download_bep_xlsx).props("dense")
-    ui.label("Green = a green candle touched BEP (low <= BEP) and closed above it. Red = one of the next 3 candles (15 min) "
-             "closed below the fail level. ⭐ = first support of the day for that strike (alerts, and is added to the "
-             "Common Price Watch when inside the ATM window).").classes("text-xs opacity-70")
+    ui.label("Each row = a green candle touched BEP (low <= BEP) and closed above it. Red = one of the next 3 candles (15 min) "
+             "closed below the fail level. ⭐ = first support of the day for that strike (alerts, and is added to "
+             "Order Management when inside the ATM window).").classes("text-xs opacity-70")
 
     for name in engine.active():
         mon = engine.monitors[name]
@@ -325,16 +325,16 @@ def support_page():
                 rows = []
                 for r in view.get(opt, []):
                     row = dict(r)
-                    row["bg"], row["fg"] = SUPPORT_GREEN if r["kind"] == "green" else SUPPORT_RED
+                    row["bg"], row["fg"] = SUPPORT_HELD if r["kind"] == "green" else SUPPORT_RED
                     rows.append(row)
                 table.rows = rows
                 table.update()
         when_changed(["board"], render)
 
 
-# ====================================================================== Common Price Watch
+# ====================================================================== Order Management (common price + stars)
 def watch_page():
-    ui.label("Common Price Watch").classes("text-2xl font-bold")
+    ui.label("Order Management").classes("text-2xl font-bold")
     ui.label("Manual rows alert when a leg's candle closes ABOVE the common price (crossing up from at or below); red = "
              "closed back below after triggering. ⭐ rows are added automatically for a live first support of the day "
              "inside the ATM window (Level = BEP); red when the board row turns red. Nothing is placed automatically: "
@@ -406,7 +406,7 @@ def watch_page():
 # ====================================================================== Orders
 def orders_page():
     with ui.row().classes("w-full items-center justify-between"):
-        ui.label("AlgoDelta orders").classes("text-2xl font-bold")
+        ui.label("Order Details").classes("text-2xl font-bold")
         with ui.row().classes("gap-2"):
             ui.button("CSV", icon="download", on_click=lambda: ui.download(
                 export_utils.build_csv(list(engine.order_log), ORDER_EXPORT_COLUMNS),
@@ -687,7 +687,7 @@ def logs_page():
         ui.button("Download", icon="download", on_click=lambda: ui.download(
             "\n".join(engine.log_lines).encode("utf-8"), f"bep_log_{datetime.now().strftime('%Y-%m-%d')}.txt")) \
             .props("dense outline")
-    box = ui.log(max_lines=1000).classes("w-full mono text-xs").style("height: 75vh")
+    box = ui.log(max_lines=1000).classes("w-full mono text-sm").style("height: calc(100vh - 170px)")
     shown = {"n": 0}
 
     def push():

@@ -2,7 +2,7 @@
 engine.py - the app's single background engine.
 
 Everything that is not drawing the screen lives here: the Upstox connection, the BEP Support scan, the 09:15
-opening order, the Common Price Watch, AlgoDelta orders and their Entry / Exit tracking, the log and the alerts.
+opening order, Order Management (common price + ⭐ rows), AlgoDelta orders and their Entry / Exit tracking, the log and the alerts.
 It runs ONCE for the whole app (app.timer in app.py), however many browser tabs are open. The pages only read
 its state; each change bumps a version number so a page knows when to redraw. Alerts are queued as events that
 every open tab shows once.
@@ -274,15 +274,15 @@ class Engine:
         mon, cw, added = self.monitors[name], self.watches[name], False
         for e in events or []:
             if not e.get("in_window"):
-                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} not added to watch (outside ATM window).")
+                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} not added to Order Management (outside ATM window).")
                 continue
             if e["time"] == "09:15" and (e.get("day"), e["opt"]) in mon.side_lock:
-                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to watch "
+                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to Order Management "
                          f"({e['opt']} already has its 09:15 opening order).")
                 continue
             if cw.add_star(e):
                 added = True
-                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} added to watch "
+                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} added to Order Management "
                          f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")
         return added
 
