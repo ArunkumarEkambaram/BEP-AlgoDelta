@@ -4,10 +4,10 @@ trade_tracker.py - Entry / Exit / LTP / Captured Points / P&L for the AlgoDelta 
 SENT rows:    entry and exit are the real fills from today's Upstox trade book
               (GET /v2/order/trades/get-trades-for-day), matched by the option's instrument key.
               BUY fills = entry (quantity-weighted average), SELL fills = exit. Once the sold
-              quantity covers the bought quantity the trade is closed and Captured Points = Exit - Entry;
-              while it is open, Captured Points = live LTP - Entry. P&L = points x filled quantity (units).
-DRY RUN rows: nothing was placed, so entry = the option LTP when the signal fired and Captured Points
-              = live LTP - entry. P&L = points x quantity (lots) x lot size.
+              quantity covers the bought quantity the trade is closed and Captured Points = Exit - Entry,
+              P&L = points x filled quantity (units). While it is open, Points and P&L show "--".
+DRY RUN rows: nothing was placed, so entry = the option LTP when the signal fired; there is no exit,
+              so Points and P&L stay "--". LTP (live) is shown for every tracked row.
 FAILED / BLOCKED rows: never entered a trade; all these columns stay "--".
 """
 import config
@@ -109,8 +109,7 @@ def _keep(row, key):
 def _points(entry, exit_, ltp, qty_units):
     if entry is None:
         return {"entry": "--", "exit": "--", "points": "--", "pnl": "--"}
-    ref = exit_ if exit_ is not None else ltp
-    pts = round(ref - entry, 2) if ref is not None else None
+    pts = round(exit_ - entry, 2) if exit_ is not None else None      # Captured Points only once exited
     pnl = round(pts * qty_units, 2) if pts is not None and qty_units else None
     return {"entry": round(entry, 2), "exit": round(exit_, 2) if exit_ is not None else "--",
             "points": pts if pts is not None else "--", "pnl": pnl if pnl is not None else "--"}

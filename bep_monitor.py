@@ -48,6 +48,9 @@ class BepMonitor:
         # Order tracking
         self.side_lock = {}          # (date, opt) -> {"strike", "time", "status"}: ONE opening order per side per day
         self._open_low = {}          # (date, strike, opt) -> lowest live LTP in opening candle
+        self.plan = None             # 09:15 opening plan, prepared before the open (see prepare_opening)
+        self._plan_skip_logged = None
+        self._far_logged = set()     # (date, strike, opt) already logged as "too far above BEP"
         self.new_orders = []         # signals waiting to be sent
 
     def _reset_leg_state(self, strike, opt):
@@ -93,11 +96,6 @@ class BepMonitor:
             self.last_recalc = now
             self._refresh_quotes(client, log_fn)
             result["recalculated"] = True
-
-        try:
-            self._check_open_candle(client, index_ltp, now, log_fn)
-        except Exception as ex:
-            log_fn(f"BEP {self.name} opening-candle order check error: {ex}")
 
         self._schedule(client, now, log_fn)
         if self._process(client, now, log_fn):
@@ -157,59 +155,116 @@ class BepMonitor:
         self.new_orders.append(sig)
         return True
 
-    def _check_open_candle(self, client, index_ltp, now, log_fn):
-        """09:15-09:20: A strike's still-forming candle touched BEP (low <= BEP) and live LTP > open
-        and > BEP. Queues immediate market entry - at most ONE CE and ONE PE per day. If several
-        strikes of a side qualify in the same scan, the one closest to ATM (index LTP) wins."""
-        if config.AUTO_ORDER_PAUSED or not self.strikes or not self.expiry:
-            return
-        if not (SESSION_FIRST_CANDLE <= now.time() < dtime(9, 15 + CANDLE_MINUTES)) or not market_utils.is_market_open(now):
-            return
-
+    # ------------------------------------------------------------------ 09:15 opening order
+    def prepare_opening(self, client, index_ltp: float, now, log_fn) -> bool:
+        """Between OPENING_PREP_START and 09:15 on a trading day: picks the strike just below and just above
+        NIFTY's pre-open price (same two for CE and PE) and looks up their instrument keys and BEPs.
+        Re-run every tick until 09:15 so the plan follows the pre-open price. Returns True if the plan changed."""
+        h, mnt = (int(x) for x in config.OPENING_PREP_START.split(":"))
+        if not (dtime(h, mnt) <= now.time() < SESSION_FIRST_CANDLE) or not market_utils.is_trading_day(now):
+            return False
         day = now.strftime("%Y-%m-%d")
+        step = self.cfg["strike_interval"]
+        below = int(index_ltp // step * step)               # exactly on a strike -> that strike and the next one up
+        strikes = [below, below + step]
+        if self.plan and self.plan["day"] == day and self.plan["strikes"] == strikes and self.plan["ready"]:
+            self.plan["ref"], self.plan["prepared_at"] = index_ltp, now.strftime("%H:%M:%S")
+            return False
+
+        expiry = self.expiry or market_utils.current_weekly_expiry(client, self.cfg["underlying_key"])
+        if not expiry:
+            log_fn(f"BEP {self.name} opening plan: could not determine the weekly expiry.")
+            return False
+        self.expiry = expiry
+        mapping, err = market_utils.option_instrument_keys(client, expiry, self.cfg["underlying_key"])
+        if not mapping:
+            log_fn(f"BEP {self.name} opening plan: option instrument keys unavailable ({err}).")
+            return False
+        legs, missing = {}, []
+        for strike in strikes:
+            for opt in ("CE", "PE"):
+                ik = mapping.get(strike, {}).get(opt)
+                level, src = bep.get_bep(client, expiry, strike, self.name)
+                if ik and level is not None:
+                    legs[(strike, opt)] = {"ik": ik, "bep": level, "src": src}
+                else:
+                    missing.append(f"{strike}{opt}")
+        no_csv = not bep.csv_strikes(self.name)
+        self.plan = {"day": day, "ref": index_ltp, "strikes": strikes, "legs": legs, "expiry": expiry,
+                     "prepared_at": now.strftime("%H:%M:%S"), "ready": bool(legs), "calc_used": no_csv or any(
+                         v["src"] != "csv" for v in legs.values())}
+        desc = ", ".join(f"{s}{o} BEP {legs[(s, o)]['bep']:.2f}" for s in strikes for o in ("CE", "PE") if (s, o) in legs)
+        log_fn(f"BEP {self.name} opening plan ready: pre-open {index_ltp} -> strikes {strikes[0]} / {strikes[1]}: {desc}"
+               + (f"; missing: {', '.join(missing)}" if missing else "")
+               + ("; WARNING: no BEP CSV uploaded, using calculated BEPs" if no_csv else ""))
+        return True
+
+    def opening_tick(self, client, now, log_fn):
+        """09:15:00-09:20: one Upstox OHLC call for the prepared strikes. A strike qualifies when its day low
+        (= first candle low) touched BEP and LTP is above the open and above BEP, but less than max_above_bep
+        points above BEP. At most ONE CE and ONE PE per day (closest to the pre-open price if both qualify).
+        No plan prepared before 09:15 -> no opening order today."""
+        if not (SESSION_FIRST_CANDLE <= now.time() < dtime(9, 15 + CANDLE_MINUTES)) or not market_utils.is_trading_day(now):
+            return
+        day = now.strftime("%Y-%m-%d")
+        plan = self.plan
+        if not plan or plan["day"] != day or not plan["ready"]:
+            if self._plan_skip_logged != day:
+                self._plan_skip_logged = day
+                log_fn(f"BEP {self.name}: no opening plan prepared before 09:15 (app started late or not connected) "
+                       f"- no 09:15 order today.")
+            return
+        if config.AUTO_ORDER_PAUSED:
+            return
         open_sides = [opt for opt in ("CE", "PE") if (day, opt) not in self.side_lock]
         if not open_sides:
             return
-        quotes, err = client.fetch_ce_pe_ltp_for_strikes(self.cfg["underlying_key"], self.expiry, list(self.strikes))
+        legs = {k: v for k, v in plan["legs"].items() if k[1] in open_sides}
+        quotes, err = client.fetch_ohlc(sorted({v["ik"] for v in legs.values()}))
         if quotes is None:
-            log_fn(f"BEP {self.name} opening check: option chain fetch failed: {err}")
+            log_fn(f"BEP {self.name} opening check: quote fetch failed: {err}")
             return
-        mapping, _ = market_utils.option_instrument_keys(client, self.expiry, self.cfg["underlying_key"])
-        mapping = mapping or {}
-        start_label = day + "T" + SESSION_FIRST_CANDLE.strftime("%H:%M")
-
+        max_above = float(config.AUTO_ORDER.get(self.name, {}).get("max_above_bep", 15) or 15)
         candidates = {opt: [] for opt in open_sides}
-        for strike in self.strikes:
-            for opt in open_sides:
-                ltp = (quotes.get(strike) or {}).get(opt)
-                if ltp is None:
-                    continue
-                key = (day, strike, opt)
-                seen_low = min(self._open_low.get(key, ltp), ltp)
-                self._open_low[key] = seen_low
-                level, _src = bep.get_bep(client, self.expiry, strike, self.name)
-                if level is None or ltp <= level:
-                    continue
-                ik = mapping.get(strike, {}).get(opt)
-                if not ik:
-                    continue
-                candles, _e = client.fetch_intraday_candles(ik, CANDLE_MINUTES)
-                c = next((x for x in (candles or []) if x[0][:16] == start_label), None)
-                if not c:
-                    continue
-                o, low = float(c[1]), min(float(c[3]), seen_low)
-                if ltp > o and low <= level + support_logic.TOL:
-                    candidates[opt].append((abs(strike - index_ltp), strike, level, ltp))
+        for (strike, opt), leg in legs.items():
+            q = quotes.get(leg["ik"]) or quotes.get(leg["ik"].replace("|", ":")) or {}
+            ltp, o, low = q.get("ltp"), q.get("open"), q.get("low")
+            if ltp is None or o is None:
+                continue
+            ltp, o = float(ltp), float(o)
+            key = (day, strike, opt)
+            seen_low = min(self._open_low.get(key, ltp), ltp, float(low) if low is not None else ltp)
+            self._open_low[key] = seen_low
+            level = leg["bep"]
+            if not (seen_low <= level + support_logic.TOL and ltp > o and ltp > level):
+                continue
+            if ltp - level >= max_above:
+                if key not in self._far_logged:
+                    self._far_logged.add(key)
+                    log_fn(f"BEP {self.name} opening candle: {opt} {strike} skipped - LTP {ltp:.2f} is "
+                           f"{ltp - level:.2f} points above BEP {level:.2f} (limit < {max_above:g})")
+                continue
+            candidates[opt].append((abs(strike - plan["ref"]), strike, level, ltp))
 
         for opt, cands in candidates.items():
             if not cands:
                 continue
-            _dist, strike, level, ltp = min(cands)          # closest to ATM; tie -> lower strike
+            _dist, strike, level, ltp = min(cands)
             if self._queue_order(opt, strike, level, ltp, now):
                 others = ", ".join(str(c[1]) for c in sorted(cands) if c[1] != strike)
                 log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed above BEP {level:.2f} (LTP {ltp:.2f}) "
                        f"- order signal queued; no more {opt} orders today"
                        + (f" (also qualified, skipped: {others})" if others else ""))
+
+    def plan_text(self, day: str = None) -> str:
+        day = day or datetime.now(market_utils.IST).strftime("%Y-%m-%d")
+        p = self.plan
+        if not p or p["day"] != day:
+            return f"Opening plan: not prepared yet (prepares from {config.OPENING_PREP_START} to 09:15)"
+        legs = ", ".join(f"{s}{o} {p['legs'][(s, o)]['bep']:.2f}" for s in p["strikes"] for o in ("CE", "PE")
+                         if (s, o) in p["legs"])
+        warn = " \u26a0 some BEPs calculated (not in the uploaded CSV)" if p.get("calc_used") else ""
+        return f"Opening plan ({p['prepared_at']}, pre-open {p['ref']}): BEP {legs}{warn}"
 
     def _refresh_quotes(self, client, log_fn):
         strikes = sorted(set(self.strikes or []) | self._card_strikes())

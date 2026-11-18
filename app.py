@@ -467,6 +467,8 @@ def main_page():
                         ad_sl_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("sl_type", "POINT"), label="Stop Loss Type").classes("flex-1")
                         ad_sl = ui.number("Stop Loss Value", value=ad_cfg["sl"], min=0, step=1).classes("flex-1")
 
+                    ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
+                                             value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
                     ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
                     ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
                     with ui.row().classes("w-full gap-2 no-wrap items-center"):
@@ -479,6 +481,7 @@ def main_page():
 
                     ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
                     ad_status = ui.label("")
+                    plan_label = ui.label(mon.plan_text()).classes("text-sm text-indigo-8")
                     side_lock_label = ui.label(mon.side_status_text()).classes("text-sm font-medium text-indigo-8")
 
                     ad_template.on_value_change(lambda ev: ad_confirm.set_value(False))
@@ -502,6 +505,9 @@ def main_page():
                             return None, "Target and SL must be numbers above 0."
                         if qty is None or qty < 1 or qty != int(qty):
                             return None, "Quantity must be a whole number of at least 1."
+                        max_above = num(ad_max_above.value)
+                        if max_above is None or max_above <= 0:
+                            return None, "Max points above BEP must be a number above 0."
                         trail = bool(ad_trail.value)
                         t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
                         if trail:
@@ -510,7 +516,7 @@ def main_page():
                             if ad_trail_type.value == "POINT" and t_gap >= t_trig:
                                 return None, "With Trail Type POINT, Trail Gap must be smaller than Trail Trigger."
                         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
-                                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail,
+                                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above,
                                 "trail_type": ad_trail_type.value,
                                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -536,6 +542,7 @@ def main_page():
                                      f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
                         ad_status.set_text(f"\u2705 Saved: target {nums['tgt']} ({nums['tgt_type']}), SL {nums['sl']} ({nums['sl_type']}), qty {nums['qty']}; "
                                            f"{trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
+                                           f"09:15 order only if LTP is < {nums['max_above_bep']} above BEP; "
                                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                                            f"(live orders need both). Lasts until the app restarts.")
                         log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} AlgoDelta settings saved.")
@@ -628,7 +635,8 @@ def main_page():
             return {"section": section, "ltp_label": ltp_label, "window_label": window_label,
                     "render_board": render_board, "render_first": render_first_cards,
                     "render_latest": render_latest_cards, "render_all": render_all,
-                    "render_locks": lambda: side_lock_label.set_text(mon.side_status_text())}
+                    "render_locks": lambda: (side_lock_label.set_text(mon.side_status_text()),
+                                             plan_label.set_text(mon.plan_text()))}
 
     for _idx in config.INDEXES:
         panels[_idx] = build_panel(_idx)
@@ -718,19 +726,57 @@ def main_page():
                     if support_alerts:
                         notifier.dispatch_support_alerts(support_alerts, log_fn=log)
                     
-                    for sig in mon.pop_order_signals():
-                        res = await run.io_bound(order_bridge.send_order, sig)
-                        mon.record_order_result(sig, res["status"])
-                        log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
-                        add_order_row(sig, res)
-                        ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
-                                  position="top", timeout=15000)
-                    p["render_locks"]()
+                    await dispatch_orders(name)
                 except Exception as ex:
                     log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
             await refresh_order_tracking()
         finally:
             polling["busy"] = False
+
+    async def dispatch_orders(name):
+        """Sends every queued order signal of this index right away and records the result."""
+        mon, p = monitors[name], panels[name]
+        for sig in mon.pop_order_signals():
+            res = await run.io_bound(order_bridge.send_order, sig)
+            mon.record_order_result(sig, res["status"])
+            log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
+            add_order_row(sig, res)
+            ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                      position="top", timeout=15000)
+        p["render_locks"]()
+
+    opening = {"busy": False}
+
+    async def opening_loop():
+        """Runs every OPENING_TICK_SECONDS. Prep window (OPENING_PREP_START-09:15): read NIFTY's pre-open price and
+        prepare the strikes/BEPs. 09:15:00-09:20: check only the prepared strikes and send at once."""
+        if not token_connected or opening["busy"]:
+            return
+        now = datetime.now(market_utils.IST)
+        h, m = (int(x) for x in config.OPENING_PREP_START.split(":"))
+        start, first, end = now.replace(hour=h, minute=m, second=0, microsecond=0), \
+            now.replace(hour=9, minute=15, second=0, microsecond=0), now.replace(hour=9, minute=20, second=0, microsecond=0)
+        if not (start <= now < end) or not market_utils.is_trading_day(now):
+            return
+        opening["busy"] = True
+        try:
+            for name in [n for n in config.INDEXES if config.INDEXES[n]["enabled"]]:
+                mon, msgs = monitors[name], []
+                try:
+                    if now < first:
+                        ltps, err = await run.io_bound(fetch_index_ltps, [name])
+                        if ltps.get(name) is not None:
+                            await run.io_bound(mon.prepare_opening, client, ltps[name], now, msgs.append)
+                    else:
+                        await run.io_bound(mon.opening_tick, client, now, msgs.append)
+                except Exception as ex:
+                    msgs.append(f"{name} opening order error: {ex}")
+                stamp = datetime.now().strftime("%H:%M:%S")
+                for msg in msgs:
+                    log(f"[{stamp}] {msg}")
+                await dispatch_orders(name)
+        finally:
+            opening["busy"] = False
 
     async def refresh_order_tracking():
         """Entry / Exit / LTP / Captured Points / P&L for SENT and DRY RUN rows in the orders table."""
@@ -759,6 +805,7 @@ def main_page():
         orders_table.update()
 
     scan_timer = ui.timer(config.SCAN_INTERVAL_SECONDS, poll)
+    ui.timer(config.OPENING_TICK_SECONDS, opening_loop)
 
 
 ui.run(title="BEP Support Monitor", port=8083, reload=False)

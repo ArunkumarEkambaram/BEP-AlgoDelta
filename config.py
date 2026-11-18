@@ -22,6 +22,12 @@ STRIKES_EACH_SIDE = 2       # nearest strike +/- 2 -> 5 strikes total
 # Upstox trade book refresh for the AlgoDelta orders table (Entry / Exit of SENT orders).
 TRADES_REFRESH_SECONDS = 30
 
+# 09:15 opening order. From PREP_START to 09:15 the app reads NIFTY's pre-open price, picks the strike just
+# below and just above it (same two for CE and PE) and looks up their BEPs. From 09:15:00 to 09:20 it checks
+# only those strikes every OPENING_TICK_SECONDS with one Upstox call. Not prepared before 09:15 = no order today.
+OPENING_PREP_START = "09:08"
+OPENING_TICK_SECONDS = 1
+
 # Live scan interval (seconds).
 SCAN_INTERVAL_SECONDS = 10
 RECALC_INTERVAL_SECONDS = 60      
@@ -90,6 +96,7 @@ def _default_auto_order() -> dict:
         "webhook_url": "", "confirmed": False,
         "tgt": 50, "sl": 10, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
         "exit_on_opposite": False,
+        "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
         "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 20,
         "templates": {"strategy_order": _copy.deepcopy(_STRATEGY_ORDER)},
     }

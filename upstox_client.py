@@ -257,6 +257,29 @@ class UpstoxClient:
         except Exception as e:
             return None, str(e)
 
+    # ---------------------------------------------------------- OHLC quote (open / low / LTP in one call)
+    def fetch_ohlc(self, instrument_keys: list, interval: str = "1d"):
+        """Today's open/high/low and last price for several instruments in ONE call.
+        Returns ({instrument_key: {"open", "high", "low", "ltp"}}, None) or (None, error)."""
+        if not instrument_keys:
+            return {}, None
+        url = f"{BASE_V2}/market-quote/ohlc"
+        try:
+            resp = requests.get(url, headers=self.headers,
+                                params={"instrument_key": ",".join(instrument_keys), "interval": interval}, timeout=5)
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+            out = {}
+            for v in (resp.json().get("data") or {}).values():
+                ik = v.get("instrument_token") or v.get("instrument_key")
+                o = v.get("ohlc") or {}
+                if ik:
+                    out[ik] = {"open": o.get("open"), "high": o.get("high"), "low": o.get("low"),
+                               "ltp": v.get("last_price")}
+            return out, None
+        except Exception as e:
+            return None, str(e)
+
     # ---------------------------------------------------------- today's trades (fills)
     def fetch_trades_for_day(self):
         """Today's executed trades in this Upstox account. Returns (list, None) or (None, error).

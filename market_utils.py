@@ -29,6 +29,14 @@ def is_market_open(now=None) -> bool:
     return open_h * 60 + open_m <= minutes < close_h * 60 + close_m
 
 
+def is_trading_day(now=None) -> bool:
+    """Weekday and not in config.MARKET_HOLIDAYS (IST)."""
+    now = now or datetime.now(IST)
+    if now.tzinfo is not None:
+        now = now.astimezone(IST)
+    return now.weekday() < 5 and now.strftime("%Y-%m-%d") not in config.MARKET_HOLIDAYS
+
+
 def nearest_strike(ltp: float, interval: int = config.STRIKE_INTERVAL) -> int:
     """Rounds Nifty LTP to the nearest tradable strike."""
     return int(round(ltp / interval) * interval)
