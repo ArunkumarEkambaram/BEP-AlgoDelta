@@ -46,7 +46,7 @@ class BepMonitor:
         self._notified = set()
         
         # Order tracking
-        self.ordered = set()         # (date, opt, strike) already ordered
+        self.side_lock = {}          # (date, opt) -> {"strike", "time", "status"}: ONE opening order per side per day
         self._open_low = {}          # (date, strike, opt) -> lowest live LTP in opening candle
         self.new_orders = []         # signals waiting to be sent
 
@@ -119,42 +119,68 @@ class BepMonitor:
         out, self.new_orders = self.new_orders, []
         return out
 
+    # ------------------------------------------------------------------ one order per side per day
+    def lock_side(self, day, opt, strike, time_str, status):
+        """Marks CE or PE as already ordered for `day` (also used to restore the lock from today's orders file)."""
+        self.side_lock[(day, opt)] = {"strike": strike, "time": time_str, "status": status}
+
+    def record_order_result(self, sig, status: str):
+        """Called by the app after send_order. BLOCKED (paused / daily limit) frees the side again;
+        SENT, DRY RUN and FAILED keep it locked for the rest of the day."""
+        key = (sig["date"], sig["opt"])
+        if status == "blocked":
+            self.side_lock.pop(key, None)
+        elif key in self.side_lock:
+            self.side_lock[key]["status"] = status
+
+    def side_status_text(self, day: str = None) -> str:
+        day = day or datetime.now(market_utils.IST).strftime("%Y-%m-%d")
+        names = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "queued": "sending"}
+        parts = []
+        for opt in ("CE", "PE"):
+            lk = self.side_lock.get((day, opt))
+            if lk:
+                parts.append(f"{opt}: ordered {lk['strike']} at {lk['time']} ({names.get(lk['status'], lk['status'])})")
+            else:
+                parts.append(f"{opt}: open")
+        return "09:15 orders today \u2014 " + " \u00b7 ".join(parts)
+
     def _queue_order(self, opt, strike, level, ltp, now):
         if config.AUTO_ORDER_PAUSED:
             return False
-        okey = (now.strftime("%Y-%m-%d"), opt, strike)
-        if okey in self.ordered:
+        day = now.strftime("%Y-%m-%d")
+        if (day, opt) in self.side_lock:
             return False
-        self.ordered.add(okey)
+        self.lock_side(day, opt, strike, now.strftime("%H:%M:%S"), "queued")
         sig = {"index": self.name, "opt": opt, "strike": strike, "bep": level, "ltp": ltp, "expiry": self.expiry,
-               "kind": "opening", "order_type": "strategy_order", "time": now.strftime("%H:%M:%S")}
+               "kind": "opening", "order_type": "strategy_order", "time": now.strftime("%H:%M:%S"), "date": day}
         self.new_orders.append(sig)
         return True
 
     def _check_open_candle(self, client, index_ltp, now, log_fn):
-        """09:15-09:20: A strike's still-forming candle touched BEP (low <= BEP) and live LTP > open 
-        and > BEP. Queues immediate market entry."""
+        """09:15-09:20: A strike's still-forming candle touched BEP (low <= BEP) and live LTP > open
+        and > BEP. Queues immediate market entry - at most ONE CE and ONE PE per day. If several
+        strikes of a side qualify in the same scan, the one closest to ATM (index LTP) wins."""
         if config.AUTO_ORDER_PAUSED or not self.strikes or not self.expiry:
             return
         if not (SESSION_FIRST_CANDLE <= now.time() < dtime(9, 15 + CANDLE_MINUTES)) or not market_utils.is_market_open(now):
             return
-        
+
         day = now.strftime("%Y-%m-%d")
-        quotes = None
-        mapping = None
+        open_sides = [opt for opt in ("CE", "PE") if (day, opt) not in self.side_lock]
+        if not open_sides:
+            return
+        quotes, err = client.fetch_ce_pe_ltp_for_strikes(self.cfg["underlying_key"], self.expiry, list(self.strikes))
+        if quotes is None:
+            log_fn(f"BEP {self.name} opening check: option chain fetch failed: {err}")
+            return
+        mapping, _ = market_utils.option_instrument_keys(client, self.expiry, self.cfg["underlying_key"])
+        mapping = mapping or {}
         start_label = day + "T" + SESSION_FIRST_CANDLE.strftime("%H:%M")
-        
+
+        candidates = {opt: [] for opt in open_sides}
         for strike in self.strikes:
-            for opt in ("CE", "PE"):
-                if (day, opt, strike) in self.ordered:
-                    continue
-                if quotes is None:
-                    quotes, err = client.fetch_ce_pe_ltp_for_strikes(self.cfg["underlying_key"], self.expiry, list(self.strikes))
-                    if quotes is None:
-                        log_fn(f"BEP {self.name} opening check: option chain fetch failed: {err}")
-                        return
-                    mapping, _ = market_utils.option_instrument_keys(client, self.expiry, self.cfg["underlying_key"])
-                    mapping = mapping or {}
+            for opt in open_sides:
                 ltp = (quotes.get(strike) or {}).get(opt)
                 if ltp is None:
                     continue
@@ -173,8 +199,17 @@ class BepMonitor:
                     continue
                 o, low = float(c[1]), min(float(c[3]), seen_low)
                 if ltp > o and low <= level + support_logic.TOL:
-                    if self._queue_order(opt, strike, level, ltp, now):
-                        log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed above BEP {level:.2f} (LTP {ltp:.2f}) - order signal queued")
+                    candidates[opt].append((abs(strike - index_ltp), strike, level, ltp))
+
+        for opt, cands in candidates.items():
+            if not cands:
+                continue
+            _dist, strike, level, ltp = min(cands)          # closest to ATM; tie -> lower strike
+            if self._queue_order(opt, strike, level, ltp, now):
+                others = ", ".join(str(c[1]) for c in sorted(cands) if c[1] != strike)
+                log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed above BEP {level:.2f} (LTP {ltp:.2f}) "
+                       f"- order signal queued; no more {opt} orders today"
+                       + (f" (also qualified, skipped: {others})" if others else ""))
 
     def _refresh_quotes(self, client, log_fn):
         strikes = sorted(set(self.strikes or []) | self._card_strikes())

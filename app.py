@@ -88,6 +88,22 @@ def _load_orders_today() -> list:
 
 order_log = _load_orders_today()
 
+_LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
+
+
+def _restore_side_locks():
+    """After an app restart, keep CE / PE locked if today's orders file already has an order for that side."""
+    today = datetime.now(market_utils.IST).strftime("%Y-%m-%d")
+    for r in order_log:
+        status = _LOCKING_STATUS.get(r.get("status"))
+        if status and r.get("index") in monitors and r.get("opt") in ("CE", "PE"):
+            mon = monitors[r["index"]]
+            if (today, r["opt"]) not in mon.side_lock:          # first (earliest) order of the side wins
+                mon.lock_side(today, r["opt"], r.get("strike"), r.get("time", ""), status)
+
+
+_restore_side_locks()
+
 
 def _save_order_row(row: dict):
     try:
@@ -444,6 +460,7 @@ def main_page():
 
                     ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
                     ad_status = ui.label("")
+                    side_lock_label = ui.label(mon.side_status_text()).classes("text-sm font-medium text-indigo-8")
 
                     ad_template.on_value_change(lambda ev: ad_confirm.set_value(False))
 
@@ -591,7 +608,8 @@ def main_page():
             section.set_visibility(config.INDEXES[name]["enabled"])
             return {"section": section, "ltp_label": ltp_label, "window_label": window_label,
                     "render_board": render_board, "render_first": render_first_cards,
-                    "render_latest": render_latest_cards, "render_all": render_all}
+                    "render_latest": render_latest_cards, "render_all": render_all,
+                    "render_locks": lambda: side_lock_label.set_text(mon.side_status_text())}
 
     for _idx in config.INDEXES:
         panels[_idx] = build_panel(_idx)
@@ -680,10 +698,12 @@ def main_page():
                     
                     for sig in mon.pop_order_signals():
                         res = await run.io_bound(order_bridge.send_order, sig)
+                        mon.record_order_result(sig, res["status"])
                         log(f"[{datetime.now().strftime('%H:%M:%S')}] {res['message']}")
                         add_order_row(sig, res)
                         ui.notify(res["message"][:160], type={"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
                                   position="top", timeout=15000)
+                    p["render_locks"]()
                 except Exception as ex:
                     log(f"[{datetime.now().strftime('%H:%M:%S')}] {name} BEP monitor error: {ex}")
         finally:
