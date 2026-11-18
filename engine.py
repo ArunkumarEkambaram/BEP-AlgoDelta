@@ -274,13 +274,39 @@ class Engine:
         return saved
 
     # ------------------------------------------------------------------ common price watch
+    @staticmethod
+    def default_target(name, kind: str):
+        """(type, value) a new Order Management row starts with: kind 'same', 'pair' or 'star'."""
+        cfg = config.AUTO_ORDER[name]
+        return cfg.get("tgt_type", "POINT"), float(cfg.get(f"tgt_{kind}", cfg.get("tgt", 50)))
+
+    def _stamp_target(self, name, rows, kind):
+        tgt_type, tgt = self.default_target(name, kind)
+        for r in rows:
+            r.setdefault("tgt_type", tgt_type)
+            r.setdefault("tgt", tgt)
+        self.watches[name].save()
+
+    def row_target(self, name, r):
+        kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "same")
+        d_type, d_tgt = self.default_target(name, kind)
+        return r.get("tgt_type") or d_type, float(r["tgt"]) if r.get("tgt") is not None else d_tgt
+
+    def set_watch_target(self, name, row_id, tgt_type, tgt) -> bool:
+        ok = self.watches[name].set_target(row_id, tgt_type, tgt)
+        if ok:
+            self.log(f"{name} Order Management row {row_id}: target set to {tgt:g} ({tgt_type}).")
+        return ok
+
     def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf):
         r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now())
+        self._stamp_target(name, [r], "pair")
         self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min.")
         self.bump("watch")
 
     def add_watch(self, name, strike, leg, price, tf):
         rows = self.watches[name].add(strike, leg, price, tf, _now())
+        self._stamp_target(name, rows, "same")
         self.log(f"{name} common price watch added: "
                  + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
         self.bump("watch")
@@ -297,10 +323,11 @@ class Engine:
         kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "common")
         label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
                  "common": "Manual — common price"}[kind]
+        tgt_type, tgt = self.row_target(name, r)
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
                "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
                "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
-               "kind_label": label, "time": _stamp()}
+               "kind_label": label, "time": _stamp(), "params": {"tgt": tgt, "tgt_type": tgt_type}}
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
         res = await run.io_bound(order_bridge.send_order, sig)
@@ -361,7 +388,9 @@ class Engine:
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to Order Management "
                          f"({e['opt']} already has its 09:15 opening order).")
                 continue
-            if cw.add_star(e):
+            row = cw.add_star(e)
+            if row:
+                self._stamp_target(name, [row], "star")
                 added = True
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} added to Order Management "
                          f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")

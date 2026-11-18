@@ -158,6 +158,15 @@ class CommonWatch:
     def get(self, row_id: int):
         return next((r for r in self.rows if r["id"] == row_id), None)
 
+    def set_target(self, row_id: int, tgt_type: str, tgt: float) -> bool:
+        """Row's own target (type + value). Locked once the row has been ordered."""
+        r = self.get(row_id)
+        if not r or r.get("order_status") in ("SENT", "DRY RUN", "sending"):
+            return False
+        r["tgt_type"], r["tgt"] = tgt_type, float(tgt)
+        self.save()
+        return True
+
     def set_order_status(self, row_id: int, status: str):
         r = self.get(row_id)
         if r:
