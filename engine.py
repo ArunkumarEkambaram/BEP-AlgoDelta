@@ -22,7 +22,7 @@ import settings_store
 import trade_tracker
 import upstox_client
 from bep_monitor import BepMonitor
-from common_watch import CommonWatch
+from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
@@ -274,6 +274,11 @@ class Engine:
         return saved
 
     # ------------------------------------------------------------------ common price watch
+    def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf):
+        r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now())
+        self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min.")
+        self.bump("watch")
+
     def add_watch(self, name, strike, leg, price, tf):
         rows = self.watches[name].add(strike, leg, price, tf, _now())
         self.log(f"{name} common price watch added: "
@@ -289,19 +294,62 @@ class Engine:
         r = cw.get(row_id)
         if not r or r["status"] != "triggered" or r["order_status"] in ("SENT", "DRY RUN", "sending"):
             return None
-        star = r.get("source") == "star"
+        kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "common")
+        label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
+                 "common": "Manual — common price"}[kind]
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
                "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
-               "expiry": mon.expiry, "order_type": "strategy_order", "kind": "star" if star else "common",
-               "kind_label": "Manual — ⭐ support" if star else "Manual — common price", "time": _stamp()}
+               "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
+               "kind_label": label, "time": _stamp()}
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
         res = await run.io_bound(order_bridge.send_order, sig)
         cw.set_order_status(row_id, ORDER_STATUS.get(res["status"], res["status"]))
         self.log(res["message"])
         self.add_order_row(sig, res)
+        if r.get("kind") == "pair":
+            r["order_id"] = self.order_log[-1]["id"]
+            cw.save()
         self.bump("watch")
         return res
+
+    async def handle_pair_exits(self, name):
+        """Opponent SL of a pair: live -> AlgoDelta squareoff_position; dry run -> record the exit at the bought
+        leg's close. Skipped if the order already has an exit (target / SL / trail hit first)."""
+        cw, mon = self.watches[name], self.monitors[name]
+        for ev in cw.pop_exits():
+            row = next((o for o in self.order_log if o["id"] == ev.get("order_id")), None)
+            opp = "PE" if ev["opt"] == "CE" else "CE"
+            why = f"opponent {opp} closed {ev['opp_close']:.2f} at {ev['fail_time']}"
+            if row is None:
+                continue
+            already = isinstance(row.get("exit"), (int, float)) or trade_tracker._f(row.get("exit")) is not None
+            if already:
+                self.log(f"Pair {CommonWatch.pair_title(ev)}: {why}, but the order had already exited - nothing to do.")
+                status = "not needed"
+            elif row.get("status") == "DRY RUN":
+                row.update(exit=round(ev["exit_close"], 2), exit_time=ev["fail_time"], exit_reason="Opponent SL",
+                           detail=f"{row.get('detail', '')} | Exit: Opponent SL {ev['fail_time']}".strip(" |"))
+                res = order_bridge.send_squareoff(name, ev["opt"], ev["strike"], mon.expiry, why)
+                self.log(res["message"])
+                self.log(f"DRY RUN pair exit {ev['opt']} {ev['strike']} at {ev['exit_close']:.2f} ({why}).")
+                self._rewrite_orders_file()
+                status = "DRY RUN"
+            elif row.get("status") == "SENT":
+                res = await run.io_bound(order_bridge.send_squareoff, name, ev["opt"], ev["strike"], mon.expiry, why)
+                self.log(res["message"])
+                self.notify(res["message"][:160], "warning" if res["status"] == "sent" else "negative",
+                            f"{name} square-off {ev['strike']}{ev['opt']}")
+                row["detail"] = f"{row.get('detail', '')} | Square-off {res['status'].upper()} {_stamp()}".strip(" |")
+                self._rewrite_orders_file()
+                status = res["status"].upper()
+            else:
+                status = "not needed"
+            live = cw.get(ev["id"])
+            if live:
+                live["squareoff"] = status
+                cw.save()
+            self.bump("watch", "orders")
 
     def _add_star_rows(self, name, events) -> bool:
         mon, cw, added = self.monitors[name], self.watches[name], False
@@ -386,6 +434,7 @@ class Engine:
                     if star_added or star_failed or fired or before != after:
                         self.bump("watch")
 
+                    await self.handle_pair_exits(name)
                     await self.dispatch_orders(name)
                 except Exception as ex:
                     self.log(f"{name} BEP monitor error: {ex}")

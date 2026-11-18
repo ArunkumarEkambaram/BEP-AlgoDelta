@@ -10,6 +10,15 @@ the common price:
   - FAILED: after triggering, a later candle closes BELOW the common price. The row turns red, no alert.
 Rows are kept for the day in common_watch_YYYY-MM-DD.json next to the app.
 
+PAIR rows (kind "pair"): a CE strike and a PE strike that "fight" around a common price (PE may have its own
+price). On a candle close, a leg TRIGGERS when it closes above its price AND, in the same candle, the opponent
+closes below its price - buffer. The leg must have closed at or below its price at some point first (it is
+"armed"), so a leg already above when the row is added has to come back down and cross up. Either side can trigger, once. Then:
+  - not ordered yet: the opponent closing at or above (its price - buffer) marks the row FAILED (red).
+  - ordered: the same rule is the OPPONENT SL -> status "exited" and an exit event for the engine, which sends
+    AlgoDelta's squareoff_position (live) or records the exit at the bought leg's close (dry run).
+The normal Target / SL / trailing SL still apply as well (AlgoDelta live, simulated in dry run).
+
 \u2b50 rows (source "star") are added automatically for a LIVE first-support-of-the-day (\u2b50) on the BEP Support
 board, within that candle's ATM window. They are TRIGGERED at once (Place order ready, no extra alert - the board
 already alerts) and turn FAILED when the board's support row turns red. Their candles are not re-checked here.
@@ -120,6 +129,28 @@ class CommonWatch:
             self.save()
         return changed
 
+    def add_pair(self, ce_strike: int, pe_strike: int, ce_price: float, pe_price: float, buffer: float, tf: int,
+                 now=None) -> dict:
+        now = now or datetime.now(IST)
+        self._roll_day(now)
+        self._seq += 1
+        leg = {"prev_close": None, "last_close": None, "last_done": None}
+        row = {"id": self._seq, "index": self.index, "kind": "pair", "source": "pair",
+               "ce_strike": int(ce_strike), "pe_strike": int(pe_strike), "ce_price": float(ce_price),
+               "pe_price": float(pe_price), "buffer": float(buffer), "tf": int(tf), "added_at": now.isoformat(),
+               "status": "watching", "baseline": None, "legs": {"CE": dict(leg), "PE": dict(leg)},
+               # filled when a side triggers (so the shared Place order / alert code can use them)
+               "opt": "", "strike": None, "price": None, "trig_time": "", "trig_close": None,
+               "last_close": None, "last_time": "", "fail_time": "", "fail_close": None,
+               "opp_close": None, "exit_close": None, "order_status": "", "order_id": None, "squareoff": ""}
+        self.rows.append(row)
+        self.save()
+        return row
+
+    def pop_exits(self) -> list:
+        out, self._exits = getattr(self, "_exits", []), []
+        return out
+
     def remove(self, row_id: int):
         self.rows = [r for r in self.rows if r["id"] != row_id]
         self.save()
@@ -145,6 +176,11 @@ class CommonWatch:
         triggered = []
         changed = False
         for r in self.rows:
+            if r.get("kind") == "pair":
+                fired, ch = self._step_pair(client, mapping, r, now)
+                triggered.extend(fired)
+                changed = changed or ch
+                continue
             if r["status"] == "failed" or r.get("source") == "star":
                 continue
             tf = timedelta(minutes=r["tf"])
@@ -186,8 +222,89 @@ class CommonWatch:
             self.save()
         return triggered
 
+    def _step_pair(self, client, mapping, r, now):
+        if r["status"] in ("failed", "exited"):
+            return [], False
+        tf = timedelta(minutes=r["tf"])
+        ref = now - FINALIZE_DELAY
+        minute = ref.minute - ref.minute % r["tf"]
+        latest_closed_end = ref.replace(minute=minute, second=0, microsecond=0)
+        last = r["legs"]["CE"]["last_done"]
+        if last and datetime.fromisoformat(last) + tf >= latest_closed_end:
+            return [], False
+        iks = {"CE": mapping.get(r["ce_strike"], {}).get("CE"), "PE": mapping.get(r["pe_strike"], {}).get("PE")}
+        if not all(iks.values()):
+            return [], False
+        closes = {}
+        for opt, ik in iks.items():
+            candles, _err = client.fetch_intraday_candles(ik, r["tf"])
+            closes[opt] = {c[0]: float(c[4]) for c in (candles or []) if _ts(c) + tf <= ref}
+        times = sorted(set(closes["CE"]) & set(closes["PE"]), key=lambda t: datetime.fromisoformat(t))
+        if not times:
+            return [], False
+        added_at = datetime.fromisoformat(r["added_at"])
+        price = {"CE": r["ce_price"], "PE": r["pe_price"]}
+        line = {o: price[o] - r["buffer"] for o in ("CE", "PE")}      # the opponent must stay BELOW this
+        changed, fired = False, []
+        if r["baseline"] is None:
+            before = [t for t in times if datetime.fromisoformat(t) + tf <= added_at]
+            base = before[-1] if before else None
+            r["baseline"] = base or "none"
+            for o in ("CE", "PE"):
+                r["legs"][o].update(prev_close=closes[o][base] if base else None, last_done=base)
+            changed = True
+        for t in times:
+            done = r["legs"]["CE"]["last_done"]
+            if done and datetime.fromisoformat(t) <= datetime.fromisoformat(done):
+                continue
+            label = (datetime.fromisoformat(t).astimezone(IST) + tf).strftime("%H:%M")
+            if r["status"] == "watching":
+                for o, opp in (("CE", "PE"), ("PE", "CE")):
+                    prev, close = r["legs"][o]["prev_close"], closes[o][t]
+                    if prev is not None and prev <= price[o]:
+                        r["legs"][o]["armed"] = True          # has been at or below its price since the row was added
+                    if r["legs"][o].get("armed") and close > price[o] and closes[opp][t] < line[opp]:
+                        strike = r["ce_strike"] if o == "CE" else r["pe_strike"]
+                        r.update(status="triggered", opt=o, strike=strike, price=price[o], trig_time=label,
+                                 trig_close=close, last_close=close, last_time=label)
+                        fired.append(dict(r))
+                        break
+            elif r["status"] == "triggered":
+                o = r["opt"]
+                opp = "PE" if o == "CE" else "CE"
+                r.update(last_close=closes[o][t], last_time=label)
+                if closes[opp][t] >= line[opp]:
+                    ordered = r["order_status"] in ("SENT", "DRY RUN")
+                    r.update(status="exited" if ordered else "failed", fail_time=label, fail_close=closes[opp][t],
+                             opp_close=closes[opp][t], exit_close=closes[o][t])
+                    if ordered:
+                        self._exits = getattr(self, "_exits", []) + [dict(r)]
+            for o in ("CE", "PE"):
+                r["legs"][o].update(prev_close=closes[o][t], last_close=closes[o][t], last_done=t)
+            changed = True
+            if r["status"] in ("failed", "exited"):
+                break
+        return fired, changed
+
+    @staticmethod
+    def pair_title(r) -> str:
+        pe = "" if r["pe_price"] == r["ce_price"] else f" (PE @ {r['pe_price']:g})"
+        return f"{r['ce_strike']}CE / {r['pe_strike']}PE @ {r['ce_price']:g}{pe}"
+
     @staticmethod
     def status_text(r) -> str:
+        if r.get("kind") == "pair":
+            opp = "PE" if r.get("opt") == "CE" else "CE"
+            if r["status"] == "watching":
+                return "Watching both legs"
+            text = f"{r['opt']} closed above at {r['trig_time']}, close {r['trig_close']:.2f}"
+            if r["status"] == "failed":
+                text += f" \u2192 failed: {opp} closed {r['fail_close']:.2f} at {r['fail_time']}"
+            elif r["status"] == "exited":
+                text += (f" \u2192 opponent SL: {opp} closed {r['opp_close']:.2f} at {r['fail_time']}"
+                         + (f"; square-off {r['squareoff']}" if r.get("squareoff") else ""))
+            return text
+
         if r.get("source") == "star":
             text = f"\u2b50 support at {r['trig_time']}, close {r['trig_close']:.2f}"
             if r["status"] == "failed":

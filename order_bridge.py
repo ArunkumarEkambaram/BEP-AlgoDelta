@@ -85,6 +85,8 @@ def _describe(sig: dict) -> str:
     head = f"{sig['index']} {sig['opt']} {sig['strike']}"
     if sig.get("kind") == "star":
         return f"{head} [manual, \u2b50 support, BEP {sig['bep']:.2f}] (close {sig['ltp']:.2f})"
+    if sig.get("kind") == "pair":
+        return f"{head} [manual, pair @ {sig['bep']:g}] (close {sig['ltp']:.2f})"
     if sig.get("kind") == "common":
         return f"{head} [manual, common price {sig['bep']:g}] (last close {sig['ltp']:.2f})"
     return f"{head} [opening candle] (BEP {sig['bep']:.2f}, LTP {sig['ltp']:.2f})"
@@ -135,3 +137,31 @@ def send_order(sig: dict) -> dict:
                     f"HTTP {resp.status_code} {body} (not retried)")
     except Exception as ex:
         return _res("failed", f"ORDER FAILED {head} -> {ex} (not retried)", payload, f"{ex} (not retried)")
+
+
+def send_squareoff(index: str, opt: str, strike, expiry, reason: str = "") -> dict:
+    """AlgoDelta squareoff_position for one option (used by the pair watch's opponent SL).
+    Not blocked by Pause algo trade or the daily order limit - it only closes a position.
+    Dry run (or no webhook / unconfirmed template) only logs it."""
+    cfg = config.AUTO_ORDER[index]
+    product = (cfg["templates"].get("strategy_order") or {}).get("product", "INTRADAY")
+    symbol = f"{index}{_expiry_code(expiry)}{int(strike)}{opt}"
+    payload = {"type": "squareoff_position", "script_type": opt, "script": symbol, "product": product}
+    head = f"SQUARE-OFF {symbol}" + (f" ({reason})" if reason else "")
+    why = None
+    if config.AUTO_ORDER_DRY_RUN:
+        why = "dry run"
+    elif not cfg["confirmed"]:
+        why = "JSON template not confirmed"
+    elif not cfg["webhook_url"]:
+        why = "no webhook URL set"
+    if why:
+        return _res("dry_run", f"DRY RUN ({why}) {head}: {json.dumps(payload)}", payload, why)
+    try:
+        resp = requests.post(cfg["webhook_url"], json=payload, timeout=5)
+        body = (resp.text or "")[:200]
+        ok = 200 <= resp.status_code < 300
+        return _res("sent" if ok else "failed", f"{head} -> HTTP {resp.status_code} {body}", payload,
+                    f"HTTP {resp.status_code} {body}")
+    except Exception as ex:
+        return _res("failed", f"{head} FAILED -> {ex} (not retried)", payload, f"{ex} (not retried)")
