@@ -16,6 +16,7 @@ from nicegui import app, ui
 import config
 import exit_rules
 import export_utils
+import limit_orders
 import order_bridge
 import trade_tracker
 from common_watch import CommonWatch
@@ -152,6 +153,8 @@ def root():
         ui.space()
         conn_badge = ui.badge("").props("rounded")
         mode_badge = ui.badge("").props("rounded")
+        app_sl_badge = ui.badge("").props("rounded color=red-9").classes("text-sm px-2 py-1")
+        app_sl_badge.tooltip("Limit orders: the SL / Target are watched by this app - keep this PC on and the app running")
         alerts_badge = ui.badge("ALERTS PAUSED").props("rounded color=red")
         alert_btn = ui.button("", on_click=engine.toggle_alerts).props("dense no-caps")
         algo_btn = ui.button("", on_click=engine.toggle_algo_pause).props("dense no-caps")
@@ -170,6 +173,10 @@ def root():
         else:
             mode_badge.set_text("DRY RUN" if config.AUTO_ORDER_DRY_RUN else "LIVE")
             mode_badge.props("color=" + ("orange-8" if config.AUTO_ORDER_DRY_RUN else "red"))
+        la = engine.limit_active()
+        app_sl_badge.set_text(" · ".join(([f"APP-MANAGED SL ACTIVE ({la['held']}) - keep this PC on"] if la["held"] else [])
+                                         + ([f"LIMIT OPEN ({la['waiting']})"] if la["waiting"] else [])))
+        app_sl_badge.set_visibility(bool(la["held"] or la["waiting"]))
         alerts_badge.set_visibility(config.ALERTS_PAUSED)
         alert_btn.set_text("Resume alerts" if config.ALERTS_PAUSED else "Pause alerts")
         alert_btn.props("icon=" + ("notifications_active color=green" if config.ALERTS_PAUSED
@@ -509,7 +516,7 @@ def section(title, icon, rows, empty_text, place, name):
                 b = ui.button(f"Ordered ({r['order_status']})" if done else "Place order",
                               on_click=lambda _e, i=r["id"]: place(i)).props("dense size=sm color=green")
                 b.set_enabled(r["status"] == "triggered" and not done)
-                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: engine.remove_watch(name, i)) \
+                ui.button(icon="delete", on_click=lambda _e, r=r: confirm_delete(name, r)) \
                     .props("dense flat size=sm color=grey-6")
 
 
@@ -536,7 +543,7 @@ def pair_section(rows, place, name):
                     (f"Place order {r['opt']}" if r["status"] == "triggered" else "Place order")
                 b = ui.button(text, on_click=lambda _e, i=r["id"]: place(i)).props("dense size=sm color=green")
                 b.set_enabled(r["status"] == "triggered" and not done)
-                ui.button(icon="delete", on_click=lambda _e, i=r["id"]: engine.remove_watch(name, i)) \
+                ui.button(icon="delete", on_click=lambda _e, r=r: confirm_delete(name, r)) \
                     .props("dense flat size=sm color=grey-6")
 
 
@@ -544,7 +551,8 @@ def pair_section(rows, place, name):
 OM_VIEW = {"compact": False}                      # Cards / Compact (table) view, shared by every tab
 CHIP = {"WAITING": "grey-7", "TRIGGERED": "green-7", "SENDING": "blue-7", "ORDERED": "blue-7",
         "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8", "PENDING": "amber-9",
-        "SQUARING OFF": "deep-orange-8", "SQUARE-OFF FAILED": "red-7"}
+        "SQUARING OFF": "deep-orange-8", "SQUARE-OFF FAILED": "red-7", "LIMIT OPEN": "amber-9", "FILLED": "blue-7",
+        "CANCELLING": "deep-orange-8", "CANCEL FAILED": "red-7", "CANCELLED": "grey-7", "REJECTED": "red-7"}
 
 
 def card_state(r, order=None) -> str:
@@ -556,6 +564,9 @@ def card_state(r, order=None) -> str:
     if os_ == "sending":
         return "SENDING"
     if os_ in ("SENT", "DRY RUN"):
+        m = limit_orders.parse((order or {}).get("mg"))
+        if m and not limit_orders.held(m):                 # limit order with nothing filled yet
+            return limit_orders.state_text(m)
         exited = r["status"] == "exited" or (order is not None and trade_tracker._f(order.get("exit")) is not None)
         sq = str((order or {}).get("sq") or "")
         if exited:
@@ -564,6 +575,8 @@ def card_state(r, order=None) -> str:
             return "SQUARING OFF"
         if sq.startswith("FAILED"):
             return "SQUARE-OFF FAILED"
+        if m:
+            return f"FILLED @ {m['fill']:.2f}" + (" · PARTIAL" if limit_orders.pending(m) else "")
         return f"ORDERED · {os_}"
     if r["status"] == "failed":
         return "FAILED"
@@ -625,7 +638,11 @@ def card_rule_box(name, r, kind, locked):
     else:
         d_type, d_val = cfg["sl_type"], cfg["sl"]
     order = engine.row_order(r) if locked else None
-    if order:                                         # show what was actually sent with the order
+    m = limit_orders.parse(order.get("mg")) if order else None
+    if m:                                             # limit order: the rule the app watches
+        if m.get(kind):
+            d_type, d_val = m[kind]["type"], m[kind]["value"]
+    elif order:                                       # show what was actually sent with the order
         prm = trade_tracker._params(order)
         if prm.get(kind) is not None:
             d_type, d_val = prm[kind + "_type"], prm[kind]
@@ -650,7 +667,13 @@ def card_rule_box(name, r, kind, locked):
         else:
             if locked:
                 ui.label(f"{d_val:g} {d_type}").classes("text-lg font-bold")
-                ui.label("as sent" if order else "Setup").classes("text-xs opacity-60")
+                sub = "as sent" if order else "Setup"
+                if m:
+                    sub = "app-watched"
+                    lvl, trailed = limit_orders.sl_level(m) if kind == "sl" else (limit_orders.tgt_level(m), False)
+                    if lvl is not None:
+                        sub += f" \u00b7 at {lvl:g}" + (" (trailed)" if trailed else "")
+                ui.label(sub).classes("text-xs " + ("text-amber-5" if m else "opacity-60"))
             else:
                 ui.label(f"Set {what}").classes("text-blue-5 font-medium cursor-pointer") \
                     .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set))
@@ -672,7 +695,8 @@ def trail_dialog(name, r):
             ui.label("Once the high reaches entry + Trigger, SL = high \u2212 Gap (in steps of Point); it never moves "
                      "down. Gap = Trigger moves the SL to cost at the trigger.").classes("text-xs opacity-70")
         fields.bind_visibility_from(on, "value")
-        ui.label("Sent with this card's AlgoDelta order (no change after placing).").classes("text-xs opacity-70")
+        ui.label("Watched by the app for this limit order (no change after placing)." if r.get("entry_mode") == "limit"
+                 else "Sent with this card's AlgoDelta order (no change after placing).").classes("text-xs opacity-70")
 
         def save():
             if on.value:
@@ -712,6 +736,13 @@ def card_trail_box(name, r, locked):
     order = engine.row_order(r) if locked else None
     own = bool(r.get("c_trail"))
     with card_box("Trailing", "edit" if not locked and own else None):
+        m = limit_orders.parse(order.get("mg")) if order else None
+        if m:                                         # limit order: the app's own trailing SL
+            t = m.get("trail")
+            ui.label(f"{t['trigger']:g} / {t['gap']:g}" if t else "OFF").classes(
+                "text-lg font-bold" + ("" if t else " opacity-70"))
+            ui.label("app-watched" + (f" \u00b7 step {t['step']:g}" if t else "")).classes("text-xs text-amber-5")
+            return
         if order:                                     # what was actually sent
             prm = trade_tracker._params(order)
             if prm["trail"] and prm["is_sl"]:
@@ -780,13 +811,67 @@ def edit_dialog(name, r):
     dlg.open()
 
 
+def cancel_warning(o):
+    """Orange box: other orders on the same option that AlgoDelta's cancel_order (no order id) may also hit."""
+    side = engine.cancel_side_effects(o)
+    if not side:
+        return
+    with ui.card().classes("w-full bg-orange-10 text-orange-2"):
+        ui.label("cancel_order has no order id, so it may also cancel the pending orders of:").classes("text-sm font-medium")
+        for g in side:
+            m = limit_orders.parse(g.get("mg"))
+            ui.label("\u2022 " + engine.order_label(g) + (" (its limit order)" if m else
+                                                         " (its SL / Target orders at the broker!)")).classes("text-sm")
+
+
 def confirm_delete(name, r):
-    with ui.context.client.layout, ui.dialog() as dlg, ui.card():
+    order = engine.row_order(r)
+    open_limit = order is not None and limit_orders.cancellable(limit_orders.parse(order.get("mg")))
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 440px"):
         ui.label("Delete this row?").classes("text-lg font-bold")
-        ui.label("An order already placed stays in Order Details.").classes("text-sm opacity-70")
+        if open_limit:
+            ui.label("Its limit order is still open at the exchange: deleting sends AlgoDelta cancel_order first.") \
+                .classes("text-sm text-orange-4")
+            cancel_warning(order)
+        elif r.get("order_status") == "PENDING":
+            ui.label("Its pending entry stops (nothing was sent yet).").classes("text-sm opacity-70")
+        ui.label("An order already placed stays in Order Details"
+                 + (" and its app SL / Target keep running." if order is not None and order.get("mg") else ".")) \
+            .classes("text-sm opacity-70")
+
+        async def go():
+            dlg.close()
+            await engine.delete_watch(name, r["id"])
         with ui.row().classes("w-full justify-end gap-2"):
             ui.button("Cancel", on_click=dlg.close).props("flat")
-            ui.button("Delete", on_click=lambda: (engine.remove_watch(name, r["id"]), dlg.close())).props("color=red")
+            ui.button("Cancel order & delete" if open_limit else "Delete", on_click=go).props("color=red")
+    dlg.open()
+
+
+def cancel_limit_dialog(order_id):
+    """Confirm AlgoDelta cancel_order for an open limit order (or retry a failed cancel)."""
+    o = next((x for x in engine.order_log if x["id"] == order_id), None)
+    m = limit_orders.parse(o.get("mg")) if o else None
+    if not limit_orders.cancellable(m):
+        return
+    retry = m["state"] == "CANCEL FAILED"
+    sym = order_bridge.symbol(o["index"], o.get("expiry") or engine.monitors[o["index"]].expiry, o["strike"], o["opt"])
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 440px"):
+        ui.label(("Retry cancel " if retry else "Cancel limit order ") + sym).classes("text-lg font-bold")
+        ui.label(f"Limit {m['price']:.2f} \u00b7 {engine.order_label(o)} \u00b7 {o.get('status')}").classes("text-sm")
+        if limit_orders.held(m):
+            ui.label(f"{m['filled']} already filled at {m['fill']:.2f}: only the rest is cancelled; the filled part "
+                     "stays protected by the app SL / Target.").classes("text-sm text-amber-5")
+        cancel_warning(o)
+        ui.label("Sends AlgoDelta cancel_order. Live: the Upstox order book confirms it (else CANCEL FAILED and "
+                 "Retry). Dry run: cancelled at once.").classes("text-xs opacity-70")
+
+        async def go():
+            dlg.close()
+            await engine.cancel_limit(o["id"])
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Close", on_click=dlg.close).props("flat")
+            ui.button("Retry cancel" if retry else "Cancel order", icon="cancel", on_click=go).props("color=orange-9")
     dlg.open()
 
 
@@ -890,6 +975,18 @@ def entry_price_box(name, r, pending):
             ui.icon("south" if p["dir"] == "below" else "north").classes("text-amber-5")
         ui.label(f"waiting \u00b7 armed {p['armed_at']}").classes("text-xs text-amber-5")
         return
+    if r.get("entry_mode") == "limit":                # limit order: the price always set, no direction
+        inp = ui.number(value=price, min=0.05, step=0.05) \
+            .props("dense borderless input-class=text-center").classes("w-20 text-lg font-bold")
+
+        def save_limit(_e=None):
+            if not engine.set_watch_entry(name, r["id"], inp.value):
+                ui.notify("A limit card needs a price above 0.", type="warning")
+                inp.set_value(r.get("entry_price"))
+        inp.on("blur", save_limit)
+        inp.on("keydown.enter", save_limit)
+        ui.label("LIMIT order at \u26a1").classes("text-xs text-amber-5")
+        return
     if not direction and price:
         ltp = engine.row_live_ltp(name, r)
         direction = ("below" if price <= ltp else "above") if ltp is not None else None
@@ -942,6 +1039,12 @@ def order_card(name, r, place, live):
                     ui.button("Retry square off" if retry else "Square off", icon="logout",
                               on_click=lambda: square_off_dialog(order["id"])) \
                         .props("dense unelevated no-caps color=red-8").tooltip("Exit this position now (market)")
+                m = limit_orders.parse(order.get("mg")) if order is not None else None
+                if limit_orders.cancellable(m):
+                    ui.button("Retry cancel" if m["state"] == "CANCEL FAILED" else "Cancel order", icon="cancel",
+                              on_click=lambda: cancel_limit_dialog(order["id"])) \
+                        .props("dense unelevated no-caps color=orange-9") \
+                        .tooltip("AlgoDelta cancel_order for this open limit order")
                 if pending:
                     ui.button("Cancel pending", icon="block",
                               on_click=lambda: engine.cancel_watch_entry(name, r["id"])) \
@@ -950,7 +1053,9 @@ def order_card(name, r, place, live):
                     can_place = r["status"] == "triggered" and not done
                     b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
                         .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
-                    b.tooltip(f"Arm: send when LTP reaches {r['entry_price']:.2f}" if r.get("entry_price")
+                    b.tooltip(f"Send a LIMIT order at {r['entry_price']:.2f}" if r.get("entry_mode") == "limit"
+                              and r.get("entry_price") else
+                              f"Arm: send when LTP reaches {r['entry_price']:.2f}" if r.get("entry_price")
                               else "Place order now (market)")
                     b.set_enabled(can_place)
                 ui.button(icon="close", on_click=lambda: confirm_delete(name, r)) \
@@ -986,8 +1091,10 @@ def order_card(name, r, place, live):
                 ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
             if r.get("source") == "manual":
                 with card_box("Entry"):
-                    ui.label("Manual").classes("text-lg font-bold")
-                    ui.label("no trigger \u00b7 ready").classes("text-xs opacity-60")
+                    limit = r.get("entry_mode") == "limit"
+                    ui.label("Limit" if limit else "Manual").classes("text-lg font-bold")
+                    ui.label("SL / Target by the app" if limit else "no trigger \u00b7 ready").classes(
+                        "text-xs " + ("text-amber-5" if limit else "opacity-60"))
             else:
                 with card_box("Entry"):
                     with ui.row().classes("items-center gap-1 no-wrap"):
@@ -1017,12 +1124,18 @@ def order_card(name, r, place, live):
             ui.label(CommonWatch.status_text(r)).classes("opacity-80")
             if r.get("order_status"):
                 ui.label(f"Order: {r['order_status']}" + (f" · {order.get('time', '')}" if order else "")).classes("opacity-80")
+            msg_lbl = ui.label("").classes("text-amber-5")
 
     def refresh():
         o = engine.row_order(r)
         ltp_lbl.set_text(card_ltp_text(name, r))
+        mo = limit_orders.parse(o.get("mg")) if o else None
         if entry_lbl is not None:
-            entry_lbl.set_text(_num_text(o.get("entry")) if o else "--")
+            entry = o.get("entry") if o else None
+            if trade_tracker._f(entry) is None and limit_orders.held(mo):
+                entry = mo["fill"]                      # live: order-book fill until the trade book has it
+            entry_lbl.set_text(_num_text(entry) if o else "--")
+        msg_lbl.set_text(f"Limit {mo['price']:.2f}: {mo.get('msg', '')}" if mo else "")
         pnl = trade_tracker._f(o.get("pnl")) if o else None
         pnl_lbl.set_text(f"{pnl:,.2f}" if pnl is not None else ("0" if o else "--"))
         pnl_lbl.classes(remove="text-green-5 text-red-5")
@@ -1066,6 +1179,9 @@ def make_place(name):
             return
 
         async def do():
+            if r.get("entry_mode") == "limit":
+                await engine.place_limit_order(name, row_id)
+                return
             if r.get("entry_price"):
                 if engine.row_live_ltp(name, r) is None and not r.get("entry_dir"):
                     await engine.quote_option(name, r["strike"], r["opt"])
@@ -1073,10 +1189,42 @@ def make_place(name):
                 ui.notify(msg, type="positive" if ok else "warning")
                 return
             await engine.place_watch_order(name, row_id)
-        res = confirm_same_option(name, r, do)
-        if hasattr(res, "__await__"):
-            await res
+        async def checked():
+            res = confirm_same_option(name, r, do)
+            if hasattr(res, "__await__"):
+                await res
+        if r.get("entry_mode") == "limit":
+            if not r.get("entry_price"):
+                ui.notify("Set the limit price first.", type="warning")
+                return
+            ltp = engine.row_live_ltp(name, r)
+            if ltp is None:
+                ltp = await engine.quote_option(name, r["strike"], r["opt"])
+            if not limit_sanity_ok(r["entry_price"], ltp, checked):
+                return
+        await checked()
     return place
+
+
+def limit_sanity_ok(price, ltp, then) -> bool:
+    """True when the limit price is near the LTP. Otherwise asks first (typo guard) and calls `then` on Continue."""
+    if ltp is None or ltp <= 0 or abs(price - ltp) / ltp * 100 < config.LIMIT_SANITY_PCT:
+        return True
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 420px"):
+        ui.label("Check the limit price").classes("text-lg font-bold")
+        ui.label(f"Limit {price:.2f} is {abs(price - ltp) / ltp * 100:.0f}% "
+                 f"{'above' if price > ltp else 'below'} the LTP {ltp:.2f}.").classes("text-sm")
+        if price > ltp:
+            ui.label("A BUY limit above the LTP fills at once, near the LTP.").classes("text-sm text-orange-4")
+
+        async def go():
+            dlg.close()
+            await then()
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Send anyway", on_click=go).props("color=orange-9")
+    dlg.open()
+    return False
 
 
 def om_list(name, title, icon, draw):
@@ -1219,8 +1367,10 @@ def star_page():
 def manual_page():
     om_header("Manual Entry", "Pick a strike and place a BUY yourself - no trigger condition. Market = order at "
               "⚡ / Add & place. Price = the app waits until the LTP reaches your price (↓ at or below, "
-              "↑ at or above), then sends the order. Target / Stoploss / Trailing are set on the card and sent "
-              "with the AlgoDelta strategy order.")
+              "↑ at or above), then sends a market order; Target / Stoploss / Trailing go with the AlgoDelta "
+              "strategy order. Limit = an AlgoDelta limit order at your price; its Target / Stoploss / Trailing are "
+              "watched by THIS APP on the live LTP (square-off when hit), so keep the PC on. Deleting a card with "
+              "an open limit order cancels it (cancel_order); open limits are cancelled at 15:15.")
     for name in engine.active():
         step = config.INDEXES[name]["strike_interval"]
         with ui.card().classes("w-full"):
@@ -1233,9 +1383,12 @@ def manual_page():
                 lots = ui.number("Lots", value=config.AUTO_ORDER[name]["qty"], min=1, step=1, precision=0).classes("w-24")
                 with ui.column().classes("gap-0"):
                     ui.label("Order").classes("text-xs opacity-70")
-                    mode = ui.toggle({"price": "Price", "market": "Market"}, value="price").props("dense no-caps")
+                    mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit"}, value="price") \
+                        .props("dense no-caps")
                 price = ui.number("Entry price", value=None, min=0, step=0.05).classes("w-32")
-                price.bind_visibility_from(mode, "value", lambda v: v == "price")
+                price.bind_visibility_from(mode, "value", lambda v: v in ("price", "limit"))
+                mode.on_value_change(lambda e, price=price: price.props(
+                    f'label="{"Limit price" if e.value == "limit" else "Entry price"}"'))
                 with ui.column().classes("gap-0 items-start"):
                     ui.label("LTP").classes("text-xs opacity-70")
                     ltp_lbl = ui.label("--").classes("text-lg font-bold")
@@ -1263,16 +1416,16 @@ def manual_page():
                     ui.notify(f"Strike must be a multiple of {step}; lots 1 or more.", type="negative")
                     return None
                 p = None
-                if mode.value == "price":
+                if mode.value in ("price", "limit"):
                     try:
                         p = float(price.value)
                     except (TypeError, ValueError):
-                        ui.notify("Enter the entry price (or choose Market).", type="negative")
+                        ui.notify("Enter the price (or choose Market).", type="negative")
                         return None
                     if p <= 0:
                         ui.notify("Entry price must be above 0.", type="negative")
                         return None
-                return k, opt.value, q, p
+                return k, opt.value, q, p, ("limit" if mode.value == "limit" else None)
 
             def add(name=name, validated=validated):
                 v = validated()
@@ -1331,7 +1484,9 @@ def orders_page():
     ui.label("LIVE (SENT) orders: Entry / Exit are the real fills from today's Upstox trade book (refreshed every "
              f"{config.TRADES_REFRESH_SECONDS} s). DRY RUN orders: Entry = LTP at the signal; Exit is simulated from "
              "1-minute candles with the order's Target / SL / trailing SL (SL first if both hit in one minute; "
-             "closed at 15:15 if still open). Captured Points = Exit \u2212 Entry.").classes("text-xs opacity-70")
+             "closed at 15:15 if still open). Captured Points = Exit \u2212 Entry. LIMIT orders (Manual Entry): "
+             "Entry = the fill; the SL / Target / trailing SL are watched by the app on the live LTP "
+             "(square-off when hit, once).").classes("text-xs opacity-70")
 
     table.add_slot("body-cell-rules", '''
         <q-td key="rules" :props="props" style="white-space: normal; max-width: 220px">
@@ -1367,17 +1522,28 @@ def orders_page():
 
     table.add_slot("body-cell-action", '''
         <q-td key="action" :props="props" style="white-space: nowrap">
+            <q-btn v-if="props.row.cx_action" dense unelevated no-caps size="sm" color="orange-9" icon="cancel"
+                   :label="props.row.cx_action" @click="() => $parent.$emit('cancellimit', props.row.id)" class="q-mr-xs" />
             <q-btn v-if="props.row.sq_action" dense unelevated no-caps size="sm" color="red-8" icon="logout"
                    :label="props.row.sq_action" @click="() => $parent.$emit('squareoff', props.row.id)" />
             <span v-else class="text-caption">{{ props.row.sq_text }}</span>
         </q-td>''')
     table.on("squareoff", lambda e: square_off_dialog(e.args))
+    table.on("cancellimit", lambda e: cancel_limit_dialog(e.args))
 
     def render():
         for r in engine.order_log:
             parts = [f"{'SL' if k == 'sl' else 'Tgt'} {exit_rules.describe(exit_rules.parse(r.get('c_' + k)))}"
                      for k in ("sl", "tgt") if exit_rules.parse(r.get("c_" + k))]
+            m = limit_orders.parse(r.get("mg"))
+            if m:                                       # limit order: state + the rules the app watches
+                parts = [(limit_orders.state_text(m) or f"FILLED {m['filled']} @ {m['fill']:.2f}"),
+                         "App " + (limit_orders.describe(m) or "no SL / Target")] + parts
+                if m.get("exit"):
+                    parts.append(m["exit"])
             r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
+            r["cx_action"] = ("Retry cancel" if m["state"] == "CANCEL FAILED" else "Cancel order") \
+                if limit_orders.cancellable(m) else ""
             r["rules_edit"] = engine.order_rule_editable(r)
             sq = str(r.get("sq") or "")
             r["sq_action"] = "Retry square off" if sq.startswith("FAILED") and trade_tracker._f(r.get("exit")) is None \

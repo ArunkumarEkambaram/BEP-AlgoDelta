@@ -23,6 +23,11 @@ STRIKES_EACH_SIDE = 2       # nearest strike +/- 2 -> 5 strikes total
 TRADES_REFRESH_SECONDS = 30
 OPTION_LTP_SECONDS = 2                 # live LTP on the Order Management cards (one batched call)
 
+# Manual Entry "Limit" mode (AlgoDelta limit_order, SL / Target / trailing watched by the app; limit_orders.py).
+LIMIT_POLL_SECONDS = 5                 # Upstox order book read while a live limit order is open / being cancelled
+LIMIT_CANCEL_CONFIRM_SECONDS = 30      # cancel_order not seen in the order book by then -> CANCEL FAILED (Retry)
+LIMIT_SANITY_PCT = 20                  # ask first when the limit price is this % or more away from the LTP
+
 # 09:15 opening order. From PREP_START to 09:15 the app reads NIFTY's pre-open price, picks the strike just
 # below and just above it (same two for CE and PE) and looks up their BEPs. From 09:15:00 to 09:20 it checks
 # only those strikes every OPENING_TICK_SECONDS with one Upstox call. Not prepared before 09:15 = no order today.
