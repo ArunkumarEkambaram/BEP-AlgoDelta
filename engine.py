@@ -29,6 +29,7 @@ from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
                       "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done"]
+ORDER_LOCKED = ("SENT", "DRY RUN", "sending")
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
 
@@ -165,7 +166,8 @@ class Engine:
             "id": len(self.order_log), "time": _stamp(), "index": sig["index"], "opt": sig["opt"],
             "strike": sig["strike"], "kind": sig.get("kind_label", "Opening candle"), "bep": round(float(sig["bep"]), 2),
             "ltp": round(float(sig["ltp"]), 2), "status": ORDER_STATUS.get(res["status"], res["status"]),
-            "detail": res["detail"], "payload": json.dumps(res["payload"]),
+            "detail": res["detail"] + (f" | {sig['entry_note']}" if sig.get("entry_note") else ""),
+            "payload": json.dumps(res["payload"]),
             "expiry": sig.get("expiry") or "",
             "qty": (sig.get("params") or {}).get("qty") or config.AUTO_ORDER[sig["index"]]["qty"],
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
@@ -387,7 +389,103 @@ class Engine:
         self.watches[name].remove(row_id)
         self.bump("watch")
 
-    async def place_watch_order(self, name, row_id):
+    # ------------------------------------------------------------------ entry at a price (Order Management cards)
+    @staticmethod
+    def _row_key(name, r):
+        return (name, int(r["strike"]), r["opt"]) if r.get("strike") is not None and r.get("opt") else None
+
+    def row_live_ltp(self, name, r):
+        k = self._row_key(name, r)
+        return self.option_ltp.get(k) if k else None
+
+    def set_watch_entry(self, name, row_id, price, direction=None) -> bool:
+        """Card's entry price (None = market at the click) and direction ("below" / "above", None = automatic from
+        the LTP when armed). Not while pending or once ordered."""
+        cw = self.watches[name]
+        r = cw.get(row_id)
+        if not r or r.get("order_status") in ORDER_LOCKED + ("PENDING",):
+            return False
+        r["entry_price"] = round(float(price), 2) if price else None
+        r["entry_dir"] = direction if r["entry_price"] else None
+        cw.save()
+        self.bump("watch")
+        return True
+
+    def arm_watch_entry(self, name, row_id):
+        """Arms a TRIGGERED card with an entry price: the order is sent when the live LTP reaches it."""
+        cw = self.watches[name]
+        r = cw.get(row_id)
+        if not r or r["status"] != "triggered" or r.get("order_status") in ORDER_LOCKED + ("PENDING",):
+            return False, "Only a TRIGGERED card that is not ordered can be armed."
+        price = r.get("entry_price")
+        if not price:
+            return False, "Set an entry price first."
+        ltp = self.row_live_ltp(name, r)
+        direction = r.get("entry_dir")
+        if not direction:
+            if ltp is None:
+                return False, "No live LTP yet - wait a few seconds, or pick the direction with the arrow."
+            direction = "below" if price <= ltp else "above"
+        r.update(pending={"price": price, "dir": direction, "armed_at": _stamp()}, order_status="PENDING")
+        cw.save()
+        arrow = "↓" if direction == "below" else "↑"
+        what = f"{r['strike']}{r['opt']}"
+        self.log(f"{name} {what}: entry ARMED at {price:.2f} {arrow} (LTP {ltp if ltp is not None else '--'}); "
+                 f"the order is sent when the LTP is at or {direction} the price.")
+        self.bump("watch")
+        return True, f"{what}: waiting for {price:.2f} {arrow}"
+
+    def cancel_watch_entry(self, name, row_id, reason="cancelled") -> bool:
+        cw = self.watches[name]
+        r = cw.get(row_id)
+        if not r or r.get("order_status") != "PENDING":
+            return False
+        p = r.get("pending") or {}
+        r.update(pending=None, order_status="")
+        cw.save()
+        msg = f"{name} {r.get('strike')}{r.get('opt')}: pending entry at {p.get('price', 0):.2f} {reason}."
+        self.log(msg)
+        if reason != "cancelled" and not config.ALERTS_PAUSED:
+            self.notify(msg, "warning", f"{name} pending entry {reason}")
+        self.bump("watch")
+        return True
+
+    async def check_pending_entries(self, now=None):
+        """Every OPTION_LTP_SECONDS: sends a pending card's order when its LTP reaches the price; cancels it when
+        the card fails / exits, or at 15:15."""
+        now = now or _now()
+        eod = now.replace(hour=exit_rules.EXIT_TIME.hour, minute=exit_rules.EXIT_TIME.minute, second=0, microsecond=0)
+        for name in self.active():
+            for r in list(self.watches[name].rows):
+                p = r.get("pending")
+                if r.get("order_status") != "PENDING" or not p:
+                    continue
+                if r["status"] != "triggered":
+                    self.cancel_watch_entry(name, r["id"], f"cancelled (card {r['status'].upper()})")
+                    continue
+                if now >= eod:
+                    self.cancel_watch_entry(name, r["id"], "cancelled at 15:15")
+                    continue
+                ltp = self.row_live_ltp(name, r)
+                if ltp is None:
+                    continue
+                if (p["dir"] == "below" and ltp <= p["price"]) or (p["dir"] == "above" and ltp >= p["price"]):
+                    arrow = "\u2193" if p["dir"] == "below" else "\u2191"
+                    note = f"Entry at price {p['price']:.2f} {arrow} hit, LTP {ltp:.2f} (armed {p['armed_at']})"
+                    res = await self.place_watch_order(name, r["id"], fill_ltp=ltp, entry_note=note)
+                    if res:
+                        self.notify(f"{name} {r['strike']}{r['opt']}: {note} - order {ORDER_STATUS.get(res['status'], res['status'].upper())}",
+                                    {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                                    f"{name} entry {r['strike']}{r['opt']}")
+
+    async def option_tick(self):
+        await self.refresh_option_ltps()
+        if self.connected and market_utils.is_market_open():
+            await self.check_pending_entries()
+
+    async def place_watch_order(self, name, row_id, fill_ltp=None, entry_note=""):
+        """Sends the card's order now (market). Signal LTP = the live LTP at the click / at the price hit (dry-run
+        Entry uses it), falling back to the last candle close when no live LTP is known yet."""
         cw, mon = self.watches[name], self.monitors[name]
         r = cw.get(row_id)
         if not r or r["status"] != "triggered" or r["order_status"] in ("SENT", "DRY RUN", "sending"):
@@ -407,9 +505,12 @@ class Engine:
             else:                                     # LTP / POINT -> sent to AlgoDelta as this order's value
                 params[k], params[k + "_type"] = rule["value"], rule["type"]
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
-               "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
+               "ltp": next(v for v in (fill_ltp, self.row_live_ltp(name, r), r["last_close"], r["trig_close"])
+                           if v is not None),
+               "entry_note": entry_note,
                "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
                "kind_label": label, "time": _stamp(), "params": params, "app_rules": app_rules}
+        r["pending"] = None
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
         res = await run.io_bound(order_bridge.send_order, sig)
