@@ -2,7 +2,10 @@
 trade_tracker.py - Entry / Exit / LTP / Captured Points / P&L for the AlgoDelta orders table.
 
 SENT rows:    entry and exit are the real fills from today's Upstox trade book
-              (GET /v2/order/trades/get-trades-for-day), matched by the option's instrument key.
+              (GET /v2/order/trades/get-trades-for-day), matched by the option's instrument key. When several
+              orders are on the same option, fills are shared out first-in-first-out by time: the earliest BUY
+              fills (lots x lot size units) belong to the earliest order, and SELL fills close them in the same
+              order (see _allocate). The last order on an option takes whatever is left.
               BUY fills = entry (quantity-weighted average), SELL fills = exit. Once the sold
               quantity covers the bought quantity the trade is closed and Captured Points = Exit - Entry,
               P&L = points x filled quantity (units). While it is open, Points and P&L show "--".
@@ -74,12 +77,20 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
 
     fills = {}
     if trades is not None:
-        for t in trades:
+        for n, t in sorted(enumerate(trades), key=lambda it: (_trade_time(it[1]), it[0])):
             ik = t.get("instrument_token") or t.get("instrument_key")
             side = (t.get("transaction_type") or "").upper()
             qty, price = _f(t.get("quantity")), _f(t.get("average_price"))
             if ik and side in ("BUY", "SELL") and qty and price is not None:
                 fills.setdefault(ik, {"BUY": [], "SELL": []})[side].append((qty, price))
+    alloc = {}
+    if trades is not None:
+        by_ik = {}
+        for r in tracked:
+            if r["status"] == "SENT" and iks.get(r["id"]):
+                by_ik.setdefault(iks[r["id"]], []).append(r)
+        for ik, orders in by_ik.items():
+            alloc.update(_allocate(orders, fills.get(ik, {"BUY": [], "SELL": []})))
 
     out = {}
     for r in tracked:
@@ -107,10 +118,8 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
                 out[r["id"]] = {**fields, **_points(_f(r.get("entry")), _f(r.get("exit")), ltp,
                                                     _f(r.get("filled_qty")))}
                 continue
-            f = fills.get(ik, {"BUY": [], "SELL": []}) if ik else {"BUY": [], "SELL": []}
-            entry, bought = _avg(f["BUY"])
-            sold_avg, sold = _avg(f["SELL"])
-            exit_ = sold_avg if bought and sold >= bought else None
+            a = alloc.get(r["id"], {})
+            entry, bought, exit_ = a.get("entry"), a.get("bought", 0), a.get("exit")
             qty_units = bought or None
             rules = custom_rules(r)
             if rules and exit_ is None and entry is not None and not r.get("c_done") and ik:
@@ -166,6 +175,62 @@ def simulate_exit(entry: float, entry_time: str, candles: list, prm: dict, now):
     """Dry-run exit with the order's common SL / Target / trailing SL (see exit_rules.evaluate).
     Returns (exit_price, "HH:MM", reason) or None while the trade is still open."""
     return exit_rules.evaluate(entry, entry_time, candles, base_rules(prm), now, eod=True)
+
+
+def _trade_time(t) -> datetime:
+    """Fill time of an Upstox trade (formats vary); unknown -> very late, so it keeps the list order."""
+    for key in ("exchange_timestamp", "order_timestamp", "trade_timestamp"):
+        v = t.get(key)
+        if not v:
+            continue
+        for fmt in ("%d-%m-%Y %H:%M:%S", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S"):
+            try:
+                return datetime.strptime(str(v)[:19], fmt)
+            except ValueError:
+                pass
+    return datetime.max
+
+
+def _order_units(r) -> float:
+    lots = _f(r.get("qty")) or _f(config.AUTO_ORDER.get(r.get("index"), {}).get("qty")) or 1
+    return lots * config.INDEXES.get(r.get("index"), {}).get("lot_size", 1)
+
+
+def _allocate(orders: list, f: dict) -> dict:
+    """FIFO: shares one option's BUY / SELL fills between its SENT orders, earliest order first.
+    Returns {row_id: {"entry", "bought", "exit"}}; exit only once that order's bought quantity is fully sold."""
+    orders = sorted(orders, key=lambda r: (str(r.get("time", "")), r["id"]))
+    buys = [list(x) for x in f["BUY"]]
+    sells = [list(x) for x in f["SELL"]]
+
+    def take(queue, need):                     # need None = everything left
+        got = []
+        while queue and (need is None or need > 1e-9):
+            q, p = queue[0]
+            use = q if need is None else min(q, need)
+            got.append((use, p))
+            queue[0][0] -= use
+            if queue[0][0] <= 1e-9:
+                queue.pop(0)
+            if need is not None:
+                need -= use
+        return got
+
+    out = {}
+    for i, r in enumerate(orders):
+        last = i == len(orders) - 1
+        entry, bought = _avg(take(buys, None if last else _order_units(r)))
+        out[r["id"]] = {"entry": entry, "bought": bought, "exit": None}
+    for i, r in enumerate(orders):
+        last = i == len(orders) - 1
+        bought = out[r["id"]]["bought"]
+        if not bought:
+            continue
+        sold_avg, sold = _avg(take(sells, None if last else bought))
+        if sold >= bought - 1e-9:
+            out[r["id"]]["exit"] = sold_avg
+    return out
+
 
 def _keep(row, key):
     return row.get(key, "")
