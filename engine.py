@@ -55,6 +55,8 @@ class Engine:
         self.connection_text = "Not connected"
         self.status = "Waiting for a valid Upstox token (Setup page)"
         self.ltp = {n: None for n in config.INDEXES}
+        self.option_ltp = {}                                 # (index, strike, opt) -> live LTP for Order Management cards
+        self._opt_ltp_busy = False
         self.log_lines = []
         self.events = []                                     # (seq, {"msg", "type", "title"})
         self.event_seq = 0
@@ -164,7 +166,8 @@ class Engine:
             "strike": sig["strike"], "kind": sig.get("kind_label", "Opening candle"), "bep": round(float(sig["bep"]), 2),
             "ltp": round(float(sig["ltp"]), 2), "status": ORDER_STATUS.get(res["status"], res["status"]),
             "detail": res["detail"], "payload": json.dumps(res["payload"]),
-            "expiry": sig.get("expiry") or "", "qty": config.AUTO_ORDER[sig["index"]]["qty"],
+            "expiry": sig.get("expiry") or "",
+            "qty": (sig.get("params") or {}).get("qty") or config.AUTO_ORDER[sig["index"]]["qty"],
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
             "c_sl": (sig.get("app_rules") or {}).get("c_sl", ""), "c_tgt": (sig.get("app_rules") or {}).get("c_tgt", ""),
             "c_done": "",
@@ -314,6 +317,72 @@ class Engine:
                  + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
         self.bump("watch")
 
+    def row_qty(self, name, r) -> int:
+        """Lots for an Order Management row: its own value, else the Setup quantity."""
+        return int(r.get("qty") or config.AUTO_ORDER[name]["qty"])
+
+    def set_watch_qty(self, name, row_id, lots) -> bool:
+        ok = self.watches[name].set_qty(row_id, lots)
+        if ok:
+            self.log(f"{name} Order Management row {row_id}: quantity set to {int(lots)} lot(s).")
+            self.bump("watch")
+        return ok
+
+    def edit_watch(self, name, row_id, tf, price, pe_price=None, buffer=None) -> bool:
+        ok = self.watches[name].edit(row_id, tf, price, pe_price, buffer)
+        if ok:
+            r = self.watches[name].get(row_id)
+            what = CommonWatch.pair_title(r) + f", buffer {r['buffer']:g}" if r.get("kind") == "pair" else \
+                f"{r['strike']}{r['opt']} @ {r['price']:g}"
+            self.log(f"{name} Order Management row {row_id} edited: {what} ({tf} min).")
+            self.bump("watch")
+        return ok
+
+    def row_order(self, r):
+        """The Order Details row placed from this Order Management row, or None."""
+        oid = r.get("order_id")
+        if oid is None or oid == "":
+            return None
+        return next((o for o in self.order_log if o["id"] == oid), None)
+
+    async def refresh_option_ltps(self):
+        """One batched Upstox LTP call for every option shown on the Order Management cards (both legs of a pair)."""
+        if not self.connected or self._opt_ltp_busy or not market_utils.is_market_open():
+            return
+        wanted = set()
+        for name in self.active():
+            for r in self.watches[name].rows:
+                if r.get("kind") == "pair":
+                    wanted.update({(name, r["ce_strike"], "CE"), (name, r["pe_strike"], "PE")})
+                elif r.get("strike") is not None:
+                    wanted.add((name, int(r["strike"]), r["opt"]))
+        if not wanted:
+            return
+        self._opt_ltp_busy = True
+        try:
+            keys = {}
+            for name in {w[0] for w in wanted}:
+                mon = self.monitors[name]
+                if not mon.expiry:
+                    continue
+                mapping, _err = await run.io_bound(market_utils.option_instrument_keys, self.client, mon.expiry,
+                                                   config.INDEXES[name]["underlying_key"])
+                for w in wanted:
+                    ik = (mapping or {}).get(w[1], {}).get(w[2]) if w[0] == name else None
+                    if ik:
+                        keys[ik] = w
+            if not keys:
+                return
+            ltps, _err = await run.io_bound(self.client.fetch_ltp, list(keys))
+            for ik, v in (ltps or {}).items():
+                w = keys.get(ik) or keys.get(ik.replace(":", "|"))
+                if w:
+                    self.option_ltp[w] = round(float(v), 2)
+        except Exception as ex:
+            self.log(f"Order Management LTP error: {ex}")
+        finally:
+            self._opt_ltp_busy = False
+
     def remove_watch(self, name, row_id):
         self.watches[name].remove(row_id)
         self.bump("watch")
@@ -327,7 +396,7 @@ class Engine:
         label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
                  "common": "Manual — common price"}[kind]
         tgt_type, tgt = self.row_target(name, r)
-        params, app_rules = {"tgt": tgt, "tgt_type": tgt_type}, {}
+        params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r)}, {}
         for k in ("sl", "tgt"):                       # the row's own SL / Target (popup in Order Management)
             rule = exit_rules.parse(r.get("c_" + k))
             if not rule:
@@ -347,9 +416,8 @@ class Engine:
         cw.set_order_status(row_id, ORDER_STATUS.get(res["status"], res["status"]))
         self.log(res["message"])
         self.add_order_row(sig, res)
-        if r.get("kind") == "pair":
-            r["order_id"] = self.order_log[-1]["id"]
-            cw.save()
+        r["order_id"] = self.order_log[-1]["id"]          # card shows this order's Entry / LTP / P&L
+        cw.save()
         self.bump("watch")
         return res
 

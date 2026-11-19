@@ -21,6 +21,7 @@ STRIKES_EACH_SIDE = 2       # nearest strike +/- 2 -> 5 strikes total
 
 # Upstox trade book refresh for the AlgoDelta orders table (Entry / Exit of SENT orders).
 TRADES_REFRESH_SECONDS = 30
+OPTION_LTP_SECONDS = 2                 # live LTP on the Order Management cards (one batched call)
 
 # 09:15 opening order. From PREP_START to 09:15 the app reads NIFTY's pre-open price, picks the strike just
 # below and just above it (same two for CE and PE) and looks up their BEPs. From 09:15:00 to 09:20 it checks

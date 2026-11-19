@@ -17,6 +17,7 @@ import config
 import exit_rules
 import export_utils
 import order_bridge
+import trade_tracker
 from common_watch import CommonWatch
 from engine import engine
 
@@ -535,25 +536,305 @@ def pair_section(rows, place, name):
                     .props("dense flat size=sm color=grey-6")
 
 
+# ---------------------------------------------------------------------- Order Management cards
+OM_VIEW = {"compact": False}                      # Cards / Compact (table) view, shared by every tab
+CHIP = {"WAITING": "grey-7", "TRIGGERED": "green-7", "SENDING": "blue-7", "ORDERED": "blue-7",
+        "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8"}
+
+
+def card_state(r, order=None) -> str:
+    """Card status chip: WAITING / TRIGGERED / SENDING / ORDERED · SENT|DRY RUN / EXITED / FAILED / ORDER FAILED."""
+    os_ = r.get("order_status") or ""
+    if os_ == "sending":
+        return "SENDING"
+    if os_ in ("SENT", "DRY RUN"):
+        exited = r["status"] == "exited" or (order is not None and trade_tracker._f(order.get("exit")) is not None)
+        return "EXITED" if exited else f"ORDERED · {os_}"
+    if r["status"] == "failed":
+        return "FAILED"
+    if r["status"] == "exited":
+        return "EXITED"
+    if r["status"] == "triggered":
+        return {"FAILED": "ORDER FAILED", "BLOCKED": "BLOCKED"}.get(os_, "TRIGGERED")
+    return "WAITING"
+
+
+def _chip_colour(state):
+    return CHIP.get(state.split(" ·")[0], "blue-7")
+
+
+def _num_text(v, fmt="{:.2f}"):
+    f = trade_tracker._f(v)
+    return fmt.format(f) if f is not None else "--"
+
+
+def card_symbol(name, r) -> str:
+    exp = engine.monitors[name].expiry
+    if r.get("kind") == "pair":
+        if r.get("opt"):                             # a side fired: show the leg that is ordered / orderable
+            return order_bridge.symbol(name, exp, r["strike"], r["opt"])
+        return f"{order_bridge.symbol(name, exp, r['ce_strike'], 'CE')} / {r['pe_strike']}PE"
+    return order_bridge.symbol(name, exp, r["strike"], r["opt"])
+
+
+def card_ltp_text(name, r) -> str:
+    lt = engine.option_ltp
+    if r.get("kind") == "pair":
+        ce, pe = lt.get((name, r["ce_strike"], "CE")), lt.get((name, r["pe_strike"], "PE"))
+        return " · ".join(f"{o} {v:.2f}" if v is not None else f"{o} --" for o, v in (("CE", ce), ("PE", pe)))
+    v = lt.get((name, int(r["strike"]), r["opt"]))
+    if v is None and r.get("last_close") is not None:
+        return f"{r['last_close']:.2f}*"            # * = last candle close until a live LTP arrives
+    return f"{v:.2f}" if v is not None else "--"
+
+
+def card_box(title, icon=None):
+    """One box of the card body (title on top, content below)."""
+    col = ui.column().classes("items-center justify-start gap-0 px-2 py-1 min-w-[120px] flex-1 "
+                              "border-r border-slate-700 last:border-r-0")
+    with col:
+        with ui.row().classes("items-center gap-1 no-wrap"):
+            if icon:
+                ui.icon(icon).classes("text-sm text-amber-5")
+            ui.label(title).classes("text-sm opacity-60")
+    return col
+
+
+def card_rule_box(name, r, kind, locked):
+    """Target / Stoploss box: value of the row's own rule (click to edit, x to clear) or 'Set ...' link."""
+    what = "Target" if kind == "tgt" else "Stoploss"
+    rule = exit_rules.parse(r.get("c_" + kind))
+    cfg = config.AUTO_ORDER[name]
+    if kind == "tgt":
+        d_type, d_val = engine.row_target(name, r)
+    else:
+        d_type, d_val = cfg["sl_type"], cfg["sl"]
+
+    def on_set(new_rule):
+        if engine.watches[name].set_custom(r["id"], kind, new_rule):
+            engine.log(f"{name} Order Management row {r['id']}: {'SL' if kind == 'sl' else 'Target'} "
+                       + (f"set to {exit_rules.describe(new_rule)}" if new_rule else "back to default"))
+            engine.bump("watch")
+
+    with card_box(what, "edit" if rule and not locked else None):
+        if rule:
+            with ui.row().classes("items-center gap-1 no-wrap"):
+                ui.icon("candlestick_chart" if rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
+                v = ui.label(f"{rule['value']:.2f}").classes("text-lg font-bold")
+                if not locked:
+                    v.classes("cursor-pointer")
+                    v.on("click", lambda: rule_dialog(f"Edit {what}", kind, rule, on_set))
+                    ui.button(icon="close", on_click=lambda: on_set(None)) \
+                        .props("flat dense round size=xs color=red").tooltip("Back to default")
+            ui.label(exit_rules.describe(rule)).classes("text-xs text-amber-5")
+        else:
+            if locked:
+                ui.label(f"{d_val:g} {d_type}").classes("text-lg font-bold")
+            else:
+                ui.label(f"Set {what}").classes("text-blue-5 font-medium cursor-pointer") \
+                    .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set))
+            ui.label(f"Default {d_val:g} {d_type}").classes("text-xs opacity-60")
+
+
+def edit_dialog(name, r):
+    """Edit a WAITING row: level(s) and timeframe (pair: CE price, PE price, buffer)."""
+    pair = r.get("kind") == "pair"
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 360px"):
+        ui.label("Edit " + (CommonWatch.pair_title(r) if pair else f"{r['strike']} {r['opt']}")).classes("text-lg font-bold")
+        price = ui.number("CE price" if pair else "Common price", value=r["ce_price"] if pair else r["price"],
+                          min=0, step=0.05).classes("w-full")
+        pe_price = ui.number("PE price", value=r.get("pe_price"), min=0, step=0.05).classes("w-full")
+        buffer = ui.number("Buffer", value=r.get("buffer"), min=0, step=0.05).classes("w-full")
+        pe_price.set_visibility(pair)
+        buffer.set_visibility(pair)
+        tf = ui.radio({3: "3 min", 5: "5 min"}, value=r["tf"]).props("inline dense")
+        ui.label("Saving restarts the check from the candles before the row was added.").classes("text-xs opacity-70")
+
+        def save():
+            try:
+                p = float(price.value)
+                pp = float(pe_price.value) if pair and pe_price.value else p
+                b = float(buffer.value or 0) if pair else None
+            except (TypeError, ValueError):
+                ui.notify("Enter the price.", type="negative")
+                return
+            if p <= 0 or pp <= 0 or (b is not None and b < 0):
+                ui.notify("Prices above 0; buffer 0 or more.", type="negative")
+                return
+            if engine.edit_watch(name, r["id"], int(tf.value), p, pp, b):
+                dlg.close()
+            else:
+                ui.notify("Only a WAITING row can be edited.", type="warning")
+                dlg.close()
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Close", on_click=dlg.close).props("color=red")
+            ui.button("Save", on_click=save)
+    dlg.open()
+
+
+def confirm_delete(name, r):
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card():
+        ui.label("Delete this row?").classes("text-lg font-bold")
+        ui.label("An order already placed stays in Order Details.").classes("text-sm opacity-70")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Delete", on_click=lambda: (engine.remove_watch(name, r["id"]), dlg.close())).props("color=red")
+    dlg.open()
+
+
+def order_card(name, r, place, live):
+    """One Order Management row as a card. `live` collects callbacks that refresh LTP / Entry / P&L / status."""
+    order = engine.row_order(r)
+    state = card_state(r, order)
+    done = (r.get("order_status") or "") in ORDER_DONE
+    locked = done
+    border = {"FAILED": "#b91c1c", "TRIGGERED": "#15803d"}.get(state)
+    with ui.card().classes("w-full gap-2").style(f"border: 1px solid {border}" if border else ""):
+        with ui.row().classes("w-full items-center justify-between no-wrap"):
+            with ui.row().classes("items-center gap-2"):
+                ui.label(card_symbol(name, r)).classes("text-md font-bold mono")
+                ui.badge("Buy").props("color=green-9 text-color=green-2")
+                ui.badge("INTRADAY").props("color=grey-8")
+                ui.badge(f"{r['tf']} min").props("color=grey-8")
+                if r.get("source") == "star":
+                    ui.badge(f"⭐ {r.get('trig_time', '')}").props("color=amber-9")
+                if r.get("kind") == "pair" and r.get("opt"):
+                    ui.badge(f"{r['opt']} fired · {CommonWatch.pair_title(r)}").props("color=grey-8")
+            with ui.row().classes("items-center gap-2 no-wrap"):
+                chip = ui.badge(state).props(f"color={_chip_colour(state)}").classes("text-sm px-2 py-1")
+                can_place = r["status"] == "triggered" and not done
+                b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
+                    .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
+                b.tooltip("Place order")
+                b.set_enabled(can_place)
+                ui.button(icon="close", on_click=lambda: confirm_delete(name, r)) \
+                    .props("dense unelevated color=red").tooltip("Delete row")
+                can_edit = r["status"] == "watching" and r.get("source") != "star" and not r.get("order_status")
+                e = ui.button(icon="edit", on_click=lambda: edit_dialog(name, r)) \
+                    .props("dense unelevated color=" + ("primary" if can_edit else "grey-8"))
+                e.tooltip("Edit level / timeframe")
+                e.set_enabled(can_edit)
+
+        with ui.row().classes("w-full no-wrap items-stretch overflow-x-auto"):
+            with card_box("Entry Price"):
+                entry_lbl = ui.label("--").classes("text-lg font-bold")
+            with card_box("Quantity"):
+                if locked:
+                    ui.label(str(trade_tracker._f(order.get("qty")) and int(trade_tracker._f(order.get("qty")))
+                                 if order else engine.row_qty(name, r))).classes("text-lg font-bold")
+                else:
+                    q = ui.number(value=engine.row_qty(name, r), min=1, step=1, precision=0) \
+                        .props("dense borderless input-class=text-center").classes("w-16 text-lg font-bold")
+                    q.on("blur", lambda _e, q=q: q.value and engine.set_watch_qty(name, r["id"], int(q.value)))
+                    q.on("keydown.enter", lambda _e, q=q: q.value and engine.set_watch_qty(name, r["id"], int(q.value)))
+                ui.label("lots").classes("text-xs opacity-60")
+            with card_box("P&L"):
+                pnl_lbl = ui.label("--").classes("text-lg font-bold")
+                pts_lbl = ui.label("").classes("text-xs opacity-70")
+            with card_box("LTP"):
+                ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
+            with card_box("Entry"):
+                with ui.row().classes("items-center gap-1 no-wrap"):
+                    ui.icon("show_chart").classes("text-sm")
+                    if r.get("kind") == "pair" and r["pe_price"] != r["ce_price"]:
+                        ui.label(f"CE {r['ce_price']:g} · PE {r['pe_price']:g}").classes("text-base font-bold whitespace-nowrap")
+                    else:
+                        ui.label(f"{(r['ce_price'] if r.get('kind') == 'pair' else r['price']):.2f}") \
+                            .classes("text-lg font-bold")
+                    ui.icon("arrow_upward").classes("text-sm")
+                ui.label(f"close above · {r['tf']} min" + (f" · buffer {r['buffer']:g}" if r.get("kind") == "pair" else "")) \
+                    .classes("text-xs opacity-60")
+            card_rule_box(name, r, "tgt", locked)
+            card_rule_box(name, r, "sl", locked)
+            with card_box("Trailing"):
+                cfg = config.AUTO_ORDER[name]
+                if cfg.get("trail"):
+                    ui.label(f"{cfg['trail_trigger']:g} / {cfg['trail_gap']:g}").classes("text-lg font-bold")
+                    ui.label(f"Setup · {cfg['trail_type']} · step {cfg['trail_point']:g}").classes("text-xs opacity-60")
+                else:
+                    ui.label("OFF").classes("text-lg font-bold opacity-70")
+                    ui.label("Setup (common)").classes("text-xs opacity-60")
+
+        ui.separator()
+        with ui.row().classes("w-full items-center gap-6 text-sm"):
+            with ui.row().classes("items-center gap-1 no-wrap"):
+                ui.icon("schedule").classes("text-blue-5")
+                try:
+                    created = datetime.fromisoformat(r["added_at"]).strftime("%Y-%m-%d %H:%M:%S")
+                except (KeyError, ValueError):
+                    created = "--"
+                ui.label(f"Created {created}").classes("opacity-80")
+            ui.label(CommonWatch.status_text(r)).classes("opacity-80")
+            if r.get("order_status"):
+                ui.label(f"Order: {r['order_status']}" + (f" · {order.get('time', '')}" if order else "")).classes("opacity-80")
+
+    def refresh():
+        o = engine.row_order(r)
+        ltp_lbl.set_text(card_ltp_text(name, r))
+        entry_lbl.set_text(_num_text(o.get("entry")) if o else "--")
+        pnl = trade_tracker._f(o.get("pnl")) if o else None
+        pnl_lbl.set_text(f"{pnl:,.2f}" if pnl is not None else ("0" if o else "--"))
+        pnl_lbl.classes(remove="text-green-5 text-red-5")
+        if pnl is not None:
+            pnl_lbl.classes(add="text-green-5" if pnl >= 0 else "text-red-5")
+        pts = trade_tracker._f(o.get("points")) if o else None
+        pts_lbl.set_text(f"{pts:+.2f} pts (exited {_num_text(o.get('exit'))})" if pts is not None else
+                         (f"LTP {o.get('ltp_live')}" if o and o.get("ltp_live") not in (None, "") else ""))
+        st = card_state(r, o)
+        chip.set_text(st)
+        chip.props(f"color={_chip_colour(st)}")
+    refresh()
+    live.append(refresh)
+
+
+def card_list(name, rows, place, live, empty_text):
+    if not rows:
+        ui.label(empty_text).classes("text-sm opacity-70")
+        return
+    for r in sorted(rows, key=lambda x: x["id"], reverse=True):     # newest first
+        order_card(name, r, place, live)
+
+
 def om_header(title, help_text):
-    ui.label(f"Order Management — {title}").classes("text-2xl font-bold")
-    ui.label(help_text + " Nothing is placed automatically: use Place order.").classes("text-xs opacity-70")
+    with ui.row().classes("w-full items-center justify-between"):
+        ui.label(f"Order Management — {title}").classes("text-2xl font-bold")
+        sw = ui.switch("Compact view", value=OM_VIEW["compact"]).props("dense")
+
+        def flip(ev):
+            OM_VIEW["compact"] = bool(ev.value)
+            engine.bump("watch")                          # redraw the lists in the new view
+        sw.on_value_change(flip)
+    ui.label(help_text + " Nothing is placed automatically: use ⚡ Place order.").classes("text-xs opacity-70")
 
 
 def om_list(name, title, icon, draw):
-    """Card that redraws one Order Management list whenever the engine's watch rows change."""
-    with ui.card().classes("w-full"):
-        card_title(f"{name} — {title}", icon)
-        holder = ui.column().classes("w-full")
+    """One Order Management list for an index: cards (default) or the compact table. Redrawn when the
+    engine's watch rows change; LTP / Entry / P&L / status on the cards refresh every second without a redraw."""
+    card_title(f"{name} — {title}", icon)
+    holder = ui.column().classes("w-full gap-3")
+    live = []
 
-        async def place(row_id):
-            await engine.place_watch_order(name, row_id)
+    async def place(row_id):
+        await engine.place_watch_order(name, row_id)
 
-        def render():
-            holder.clear()
-            with holder:
-                draw(place)
-        when_changed(["watch"], render)
+    def render():
+        holder.clear()
+        live.clear()
+        with holder:
+            if OM_VIEW["compact"]:
+                with ui.card().classes("w-full"):
+                    draw(place, live, True)
+            else:
+                draw(place, live, False)
+    when_changed(["watch"], render)
+
+    def tick():
+        for fn in list(live):
+            try:
+                fn()
+            except Exception:                             # the card was redrawn meanwhile
+                pass
+    ui.timer(1.0, tick)
 
 
 def tf_radio():
@@ -596,10 +877,13 @@ def same_strike_page():
                     ui.notify(f"Watching {k} {leg.value} at {p:g} ({tf.value} min).", type="positive")
                 ui.button("Add", icon="add", on_click=add)
 
-        def draw(place, name=name):
+        def draw(place, live, compact, name=name):
             rows = om_rows("same", name)
-            section(f"Same strike ({len(rows)})", "price_change", rows,
-                    "No same-strike rows yet - add one above.", place, name)
+            if compact:
+                section(f"Same strike ({len(rows)})", "price_change", rows,
+                        "No same-strike rows yet - add one above.", place, name)
+            else:
+                card_list(name, rows, place, live, "No same-strike rows yet - add one above.")
         om_list(name, "watched strikes", "visibility", draw)
 
 
@@ -637,8 +921,12 @@ def pair_page():
                     ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}.", type="positive")
                 ui.button("Add", icon="add", on_click=add)
 
-        def draw(place, name=name):
-            pair_section(om_rows("pair", name), place, name)
+        def draw(place, live, compact, name=name):
+            rows = om_rows("pair", name)
+            if compact:
+                pair_section(rows, place, name)
+            else:
+                card_list(name, rows, place, live, "No pairs yet - add one above.")
         om_list(name, "watched pairs", "visibility", draw)
 
 
@@ -647,10 +935,13 @@ def star_page():
               "window (Level = BEP) and are ready to order. Red when the BEP Support board row fails. A 09:15 ⭐ is "
               "skipped if that side already has its opening order.")
     for name in engine.active():
-        def draw(place, name=name):
+        def draw(place, live, compact, name=name):
             rows = om_rows("star", name)
-            section(f"BEP Support ⭐ ({len(rows)})", "star", rows,
-                    "No ⭐ yet - live first supports inside the ATM window appear here automatically.", place, name)
+            empty = "No ⭐ yet - live first supports inside the ATM window appear here automatically."
+            if compact:
+                section(f"BEP Support ⭐ ({len(rows)})", "star", rows, empty, place, name)
+            else:
+                card_list(name, rows, place, live, empty)
         om_list(name, "first supports", "star", draw)
 
 
@@ -1011,5 +1302,6 @@ def logs_page():
 app.on_startup(engine.auto_connect)
 engine.scan_timer = app.timer(config.SCAN_INTERVAL_SECONDS, engine.scan)
 app.timer(config.OPENING_TICK_SECONDS, engine.opening)
+app.timer(config.OPTION_LTP_SECONDS, engine.refresh_option_ltps)
 
 ui.run(title="BEP AlgoDelta", port=8083, reload=False, dark=True)
