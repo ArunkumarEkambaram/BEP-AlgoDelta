@@ -61,6 +61,7 @@ OM_SUB = [
     (OM_ROOT + "/same-strike", "price_change", "Same strike", "same"),
     (OM_ROOT + "/pair", "compare_arrows", "Pair (CE vs PE)", "pair"),
     (OM_ROOT + "/bep-star", "star", "BEP Support \u2b50", "star"),
+    (OM_ROOT + "/manual-entry", "edit_note", "Manual Entry", "manual"),
 ]
 NAV = [
     ("/", "space_dashboard", "Dashboard"),
@@ -108,7 +109,7 @@ def om_rows(kind, name=None):
     for n in ([name] if name else engine.active()):
         for r in engine.watches[n].rows:
             src = r.get("source")
-            if (src if src in ("pair", "star") else "same") == kind:
+            if (src if src in ("pair", "star", "manual") else "same") == kind:
                 out.append(r)
     return out
 
@@ -244,6 +245,7 @@ def root():
     routes = {path: page(path, b) for path, b in (
         ("/", dashboard_page), ("/support", support_page),
         (OM_SUB[0][0], same_strike_page), (OM_SUB[1][0], pair_page), (OM_SUB[2][0], star_page),
+        (OM_SUB[3][0], manual_page),
         ("/order-details", orders_page), ("/setup", setup_page), ("/logs", logs_page))}
     routes[OM_ROOT] = page(OM_SUB[0][0], same_strike_page)        # old link: opens Same strike
     ui.sub_pages(routes).classes("w-full")
@@ -924,9 +926,12 @@ def order_card(name, r, place, live):
                 ui.label(card_symbol(name, r)).classes("text-md font-bold mono")
                 ui.badge("Buy").props("color=green-9 text-color=green-2")
                 ui.badge("INTRADAY").props("color=grey-8")
-                ui.badge(f"{r['tf']} min").props("color=grey-8")
+                if r.get("source") != "manual":
+                    ui.badge(f"{r['tf']} min").props("color=grey-8")
                 if r.get("source") == "star":
-                    ui.badge(f"⭐ {r.get('trig_time', '')}").props("color=amber-9")
+                    ui.badge(f"\u2b50 {r.get('trig_time', '')}").props("color=amber-9")
+                if r.get("source") == "manual":
+                    ui.badge("Manual entry").props("color=indigo-7")
                 if r.get("kind") == "pair" and r.get("opt"):
                     ui.badge(f"{r['opt']} fired · {CommonWatch.pair_title(r)}").props("color=grey-8")
             with ui.row().classes("items-center gap-2 no-wrap"):
@@ -979,17 +984,23 @@ def order_card(name, r, place, live):
                 pts_lbl = ui.label("").classes("text-xs opacity-70")
             with card_box("LTP"):
                 ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
-            with card_box("Entry"):
-                with ui.row().classes("items-center gap-1 no-wrap"):
-                    ui.icon("show_chart").classes("text-sm")
-                    if r.get("kind") == "pair" and r["pe_price"] != r["ce_price"]:
-                        ui.label(f"CE {r['ce_price']:g} · PE {r['pe_price']:g}").classes("text-base font-bold whitespace-nowrap")
-                    else:
-                        ui.label(f"{(r['ce_price'] if r.get('kind') == 'pair' else r['price']):.2f}") \
-                            .classes("text-lg font-bold")
-                    ui.icon("arrow_upward").classes("text-sm")
-                ui.label(f"close above · {r['tf']} min" + (f" · buffer {r['buffer']:g}" if r.get("kind") == "pair" else "")) \
-                    .classes("text-xs opacity-60")
+            if r.get("source") == "manual":
+                with card_box("Entry"):
+                    ui.label("Manual").classes("text-lg font-bold")
+                    ui.label("no trigger \u00b7 ready").classes("text-xs opacity-60")
+            else:
+                with card_box("Entry"):
+                    with ui.row().classes("items-center gap-1 no-wrap"):
+                        ui.icon("show_chart").classes("text-sm")
+                        if r.get("kind") == "pair" and r["pe_price"] != r["ce_price"]:
+                            ui.label(f"CE {r['ce_price']:g} · PE {r['pe_price']:g}") \
+                                .classes("text-base font-bold whitespace-nowrap")
+                        else:
+                            ui.label(f"{(r['ce_price'] if r.get('kind') == 'pair' else r['price']):.2f}") \
+                                .classes("text-lg font-bold")
+                        ui.icon("arrow_upward").classes("text-sm")
+                    ui.label(f"close above · {r['tf']} min"
+                             + (f" · buffer {r['buffer']:g}" if r.get("kind") == "pair" else "")).classes("text-xs opacity-60")
             card_rule_box(name, r, "tgt", locked)
             card_rule_box(name, r, "sl", locked)
             card_trail_box(name, r, locked)
@@ -1047,13 +1058,8 @@ def om_header(title, help_text):
     ui.label(help_text + " Nothing is placed automatically: use ⚡ Place order.").classes("text-xs opacity-70")
 
 
-def om_list(name, title, icon, draw):
-    """One Order Management list for an index: cards (default) or the compact table. Redrawn when the
-    engine's watch rows change; LTP / Entry / P&L / status on the cards refresh every second without a redraw."""
-    card_title(f"{name} — {title}", icon)
-    holder = ui.column().classes("w-full gap-3")
-    live = []
-
+def make_place(name):
+    """The card's \u26a1: market order now, or arm the entry price. Warns first when the option is already open."""
     async def place(row_id):
         r = engine.watches[name].get(row_id)
         if not r:
@@ -1061,6 +1067,8 @@ def om_list(name, title, icon, draw):
 
         async def do():
             if r.get("entry_price"):
+                if engine.row_live_ltp(name, r) is None and not r.get("entry_dir"):
+                    await engine.quote_option(name, r["strike"], r["opt"])
                 ok, msg = engine.arm_watch_entry(name, row_id)
                 ui.notify(msg, type="positive" if ok else "warning")
                 return
@@ -1068,6 +1076,17 @@ def om_list(name, title, icon, draw):
         res = confirm_same_option(name, r, do)
         if hasattr(res, "__await__"):
             await res
+    return place
+
+
+def om_list(name, title, icon, draw):
+    """One Order Management list for an index: cards (default) or the compact table. Redrawn when the
+    engine's watch rows change; LTP / Entry / P&L / status on the cards refresh every second without a redraw."""
+    card_title(f"{name} — {title}", icon)
+    holder = ui.column().classes("w-full gap-3")
+    live = []
+
+    place = make_place(name)
 
     def render():
         holder.clear()
@@ -1195,6 +1214,94 @@ def star_page():
             else:
                 card_list(name, rows, place, live, empty)
         om_list(name, "first supports", "star", draw)
+
+
+def manual_page():
+    om_header("Manual Entry", "Pick a strike and place a BUY yourself - no trigger condition. Market = order at "
+              "⚡ / Add & place. Price = the app waits until the LTP reaches your price (↓ at or below, "
+              "↑ at or above), then sends the order. Target / Stoploss / Trailing are set on the card and sent "
+              "with the AlgoDelta strategy order.")
+    for name in engine.active():
+        step = config.INDEXES[name]["strike_interval"]
+        with ui.card().classes("w-full"):
+            card_title(f"{name} — new manual entry", "add_circle")
+            with ui.row().classes("items-end gap-6"):
+                strike = ui.number("Strike", value=centre_strike(name), step=step, precision=0).classes("w-32")
+                with ui.column().classes("gap-0"):
+                    ui.label("Option").classes("text-xs opacity-70")
+                    opt = ui.radio(["CE", "PE"], value="CE").props("inline dense")
+                lots = ui.number("Lots", value=config.AUTO_ORDER[name]["qty"], min=1, step=1, precision=0).classes("w-24")
+                with ui.column().classes("gap-0"):
+                    ui.label("Order").classes("text-xs opacity-70")
+                    mode = ui.toggle({"price": "Price", "market": "Market"}, value="price").props("dense no-caps")
+                price = ui.number("Entry price", value=None, min=0, step=0.05).classes("w-32")
+                price.bind_visibility_from(mode, "value", lambda v: v == "price")
+                with ui.column().classes("gap-0 items-start"):
+                    ui.label("LTP").classes("text-xs opacity-70")
+                    ltp_lbl = ui.label("--").classes("text-lg font-bold")
+
+            async def get_ltp(_e=None, name=name, strike=strike, opt=opt, ltp_lbl=ltp_lbl, price=price):
+                try:
+                    k = int(strike.value)
+                except (TypeError, ValueError):
+                    return None
+                v = await engine.quote_option(name, k, opt.value)
+                ltp_lbl.set_text(f"{v:.2f}" if v is not None else "--")
+                if v is not None and not price.value:
+                    price.set_value(v)
+                return v
+            strike.on("blur", get_ltp)
+            opt.on_value_change(get_ltp)
+
+            def validated(name=name, step=step, strike=strike, opt=opt, lots=lots, mode=mode, price=price):
+                try:
+                    k, q = int(strike.value), int(lots.value)
+                except (TypeError, ValueError):
+                    ui.notify("Enter the strike and lots.", type="negative")
+                    return None
+                if k <= 0 or k % step or q < 1:
+                    ui.notify(f"Strike must be a multiple of {step}; lots 1 or more.", type="negative")
+                    return None
+                p = None
+                if mode.value == "price":
+                    try:
+                        p = float(price.value)
+                    except (TypeError, ValueError):
+                        ui.notify("Enter the entry price (or choose Market).", type="negative")
+                        return None
+                    if p <= 0:
+                        ui.notify("Entry price must be above 0.", type="negative")
+                        return None
+                return k, opt.value, q, p
+
+            def add(name=name, validated=validated):
+                v = validated()
+                if v:
+                    engine.add_manual(name, *v)
+                    ui.notify(f"Manual entry card added: {v[0]}{v[1]}. Set Target / SL / Trailing on the card, "
+                              "then ⚡.", type="positive")
+
+            async def add_and_place(name=name, validated=validated):
+                v = validated()
+                if not v:
+                    return
+                r = engine.add_manual(name, *v)
+                await make_place(name)(r["id"])
+            with ui.row().classes("items-center gap-3"):
+                ui.button("LTP", icon="refresh", on_click=get_ltp).props("flat dense")
+                ui.button("Add card", icon="add", on_click=add)
+                ui.button("Add & place", icon="bolt", on_click=add_and_place).props("color=green")
+                ui.label("Add card lets you set Target / SL / Trailing first; Add & place uses the defaults.") \
+                    .classes("text-xs opacity-60")
+
+        def draw(place, live, compact, name=name):
+            rows = om_rows("manual", name)
+            empty = "No manual entries yet - add one above."
+            if compact:
+                section(f"Manual Entry ({len(rows)})", "edit_note", rows, empty, place, name)
+            else:
+                card_list(name, rows, place, live, empty)
+        om_list(name, "manual entries", "edit_note", draw)
 
 
 # ====================================================================== Orders
@@ -1411,6 +1518,7 @@ def algodelta_card(name):
                     ad_tgt_same = ui.number("Same strike", value=ad_cfg.get("tgt_same", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
                     ad_tgt_pair = ui.number("Pair", value=ad_cfg.get("tgt_pair", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
                     ad_tgt_star = ui.number("BEP Support \u2b50", value=ad_cfg.get("tgt_star", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_manual = ui.number("Manual entry", value=ad_cfg.get("tgt_manual", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
                 ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
                                          value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
                 ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
@@ -1480,9 +1588,9 @@ def algodelta_card(name):
         if qty is None or qty < 1 or qty != int(qty):
             return None, "Quantity must be a whole number of at least 1."
         defaults = {k: num(w.value) for k, w in (("tgt_same", ad_tgt_same), ("tgt_pair", ad_tgt_pair),
-                                                     ("tgt_star", ad_tgt_star))}
+                                                     ("tgt_star", ad_tgt_star), ("tgt_manual", ad_tgt_manual))}
         if any(v is None or v <= 0 for v in defaults.values()):
-            return None, "Default targets (Same strike / Pair / BEP Support) must be numbers above 0."
+            return None, "Default targets (Same strike / Pair / BEP Support / Manual entry) must be numbers above 0."
         max_above = num(ad_max_above.value)
         if max_above is None or max_above <= 0:
             return None, "Max points above BEP must be a number above 0."
@@ -1518,7 +1626,7 @@ def algodelta_card(name):
         trail_txt = (f"trail ON ({nums['trail_type']}: trigger {nums['trail_trigger']}, point {nums['trail_point']}, "
                      f"gap {nums['trail_gap']})" if nums["trail"] else "trail OFF")
         ad_status.set_text(f"✅ {saved} Target {nums['tgt']} ({nums['tgt_type']}; rows: same {nums['tgt_same']:g}, "
-                           f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}), SL {nums['sl']} ({nums['sl_type']}), "
+                           f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}, manual {nums['tgt_manual']:g}), SL {nums['sl']} ({nums['sl_type']}), "
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
                            f"09:15 order only if LTP is < {nums['max_above_bep']} above BEP; "
                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "

@@ -292,7 +292,7 @@ class Engine:
     def row_target(self, name, r):
         """Default Target of a row = the CURRENT Setup value for its type (read when the order is placed, so a Setup
         change also applies to rows added earlier). A row's own Target is its c_tgt rule (popup on the card)."""
-        kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "same")
+        kind = {"star": "star", "pair": "pair", "manual": "manual"}.get(r.get("source"), "same")
         return self.default_target(name, kind)
 
     @staticmethod
@@ -410,6 +410,31 @@ class Engine:
         k = self._row_key(name, r)
         return self.option_ltp.get(k) if k else None
 
+    async def quote_option(self, name, strike, opt):
+        """Fresh LTP for one option (also stored for the cards). None when unavailable."""
+        mon = self.monitors[name]
+        if not self.connected or not mon.expiry:
+            return self.option_ltp.get((name, int(strike), opt))
+        try:
+            mapping, _err = await run.io_bound(market_utils.option_instrument_keys, self.client, mon.expiry,
+                                               config.INDEXES[name]["underlying_key"])
+            ik = (mapping or {}).get(int(strike), {}).get(opt)
+            if ik:
+                ltps, _err = await run.io_bound(self.client.fetch_ltp, [ik])
+                v = (ltps or {}).get(ik) or (ltps or {}).get(ik.replace("|", ":"))
+                if v is not None:
+                    self.option_ltp[(name, int(strike), opt)] = round(float(v), 2)
+        except Exception as ex:
+            self.log(f"{name} {strike}{opt} quote error: {ex}")
+        return self.option_ltp.get((name, int(strike), opt))
+
+    def add_manual(self, name, strike, opt, lots, entry_price=None):
+        r = self.watches[name].add_manual(strike, opt, lots, entry_price, _now())
+        self.log(f"{name} Manual Entry added: {strike}{opt}, {lots} lot(s), "
+                 + (f"entry at {entry_price:.2f}" if entry_price else "market") + ".")
+        self.bump("watch")
+        return r
+
     def set_watch_entry(self, name, row_id, price, direction=None) -> bool:
         """Card's entry price (None = market at the click) and direction ("below" / "above", None = automatic from
         the LTP when armed). Not while pending or once ordered."""
@@ -502,9 +527,18 @@ class Engine:
         r = cw.get(row_id)
         if not r or r["status"] != "triggered" or r["order_status"] in ("SENT", "DRY RUN", "sending"):
             return None
-        kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "common")
+        kind = {"star": "star", "pair": "pair", "manual": "manual"}.get(r.get("source"), "common")
         label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
-                 "common": "Manual — common price"}[kind]
+                 "common": "Manual — common price", "manual": "Manual entry"}[kind]
+        ltp = next((v for v in (fill_ltp, self.row_live_ltp(name, r), r["last_close"], r["trig_close"])
+                    if v is not None), None)
+        if ltp is None:                               # e.g. a Manual Entry card placed right after adding
+            ltp = await self.quote_option(name, r["strike"], r["opt"])
+        if ltp is None:
+            self.log(f"{name} {r['strike']}{r['opt']}: no LTP available - order not sent.")
+            self.notify(f"{name} {r['strike']}{r['opt']}: no LTP yet - order not sent. Try again in a few seconds.",
+                        "warning")
+            return None
         tgt_type, tgt = self.row_target(name, r)
         tr = self.row_trail(name, r)
         params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r),
@@ -519,9 +553,9 @@ class Engine:
                 app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
             else:                                     # LTP / POINT -> sent to AlgoDelta as this order's value
                 params[k], params[k + "_type"] = rule["value"], rule["type"]
-        sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
-               "ltp": next(v for v in (fill_ltp, self.row_live_ltp(name, r), r["last_close"], r["trig_close"])
-                           if v is not None),
+        sig = {"index": name, "opt": r["opt"], "strike": r["strike"],
+               "bep": (r.get("entry_price") or ltp) if kind == "manual" else r["price"],
+               "ltp": ltp,
                "entry_note": entry_note,
                "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
                "kind_label": label, "time": _stamp(), "params": params, "app_rules": app_rules}

@@ -100,7 +100,7 @@ def _default_auto_order() -> dict:
         "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
         # default targets per Order Management type (the 09:15 opening order uses "tgt" / "tgt_type");
         # each row can override value and type until it is ordered
-        "tgt_same": 50, "tgt_pair": 50, "tgt_star": 50,
+        "tgt_same": 50, "tgt_pair": 50, "tgt_star": 50, "tgt_manual": 50,
         "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 19,
         "templates": {"strategy_order": _copy.deepcopy(_STRATEGY_ORDER)},
     }
