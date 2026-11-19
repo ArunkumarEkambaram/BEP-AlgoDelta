@@ -160,12 +160,12 @@ class CommonWatch:
     def get(self, row_id: int):
         return next((r for r in self.rows if r["id"] == row_id), None)
 
-    def set_target(self, row_id: int, tgt_type: str, tgt: float) -> bool:
-        """Row's own target (type + value). Locked once the row has been ordered."""
+    def set_trail(self, row_id: int, trail) -> bool:
+        """Card's own trailing SL {"on", "type", "trigger", "point", "gap"}, or None for Setup. Locked once ordered."""
         r = self.get(row_id)
         if not r or r.get("order_status") in ("SENT", "DRY RUN", "sending"):
             return False
-        r["tgt_type"], r["tgt"] = tgt_type, float(tgt)
+        r["c_trail"] = trail
         self.save()
         return True
 
