@@ -1,7 +1,9 @@
 """
 common_watch.py - Common Price Watch (manual trades, nothing is placed automatically).
 
-You add a strike, a leg (Both / CE / PE), a common price and a timeframe (3 or 5 min). Each leg is
+You add a strike, a leg (Both / CE / PE), a common price and a timeframe (3 or 5 min). A row added before
+the open has no previous candle, so the first candle's OPEN counts as the previous price: a 09:15 candle that
+opens at or below the price and closes above it triggers at 09:20 (5 min) / 09:18 (3 min). Each leg is
 tracked on its own row. After every candle of that timeframe closes, the leg's close is compared with
 the common price:
   - TRIGGERED: the close crosses ABOVE the common price (previous close <= common price, this close > it).
@@ -227,6 +229,8 @@ class CommonWatch:
                     continue
                 close, label = float(c[4]), (_ts(c) + tf).strftime("%H:%M")
                 prev = r["prev_close"]
+                if prev is None:                  # no candle before the row (added pre-open): use this candle's open
+                    prev = float(c[1])
                 if r["status"] == "watching" and prev is not None and prev <= r["price"] < close:
                     r.update(status="triggered", trig_time=label, trig_close=close)
                     triggered.append(dict(r))
@@ -253,10 +257,11 @@ class CommonWatch:
         iks = {"CE": mapping.get(r["ce_strike"], {}).get("CE"), "PE": mapping.get(r["pe_strike"], {}).get("PE")}
         if not all(iks.values()):
             return [], False
-        closes = {}
+        closes, opens = {}, {}
         for opt, ik in iks.items():
             candles, _err = client.fetch_intraday_candles(ik, r["tf"])
             closes[opt] = {c[0]: float(c[4]) for c in (candles or []) if _ts(c) + tf <= ref}
+            opens[opt] = {c[0]: float(c[1]) for c in (candles or []) if _ts(c) + tf <= ref}
         times = sorted(set(closes["CE"]) & set(closes["PE"]), key=lambda t: datetime.fromisoformat(t))
         if not times:
             return [], False
@@ -279,6 +284,8 @@ class CommonWatch:
             if r["status"] == "watching":
                 for o, opp in (("CE", "PE"), ("PE", "CE")):
                     prev, close = r["legs"][o]["prev_close"], closes[o][t]
+                    if prev is None:              # no candle before the row (added pre-open): use this candle's open
+                        prev = opens[o].get(t)
                     if prev is not None and prev <= price[o]:
                         r["legs"][o]["armed"] = True          # has been at or below its price since the row was added
                     if r["legs"][o].get("armed") and close > price[o] and closes[opp][t] < line[opp]:
