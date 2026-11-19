@@ -28,7 +28,7 @@ from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
-                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done"]
+                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq"]
 ORDER_LOCKED = ("SENT", "DRY RUN", "sending")
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
@@ -116,6 +116,7 @@ class Engine:
             for k in ("entry", "exit", "points", "pnl"):
                 r.setdefault(k, "--")
             r.setdefault("ltp_live", "")
+            r.setdefault("sq", "")
         return rows
 
     def _restore_side_locks(self):
@@ -172,7 +173,7 @@ class Engine:
             "qty": (sig.get("params") or {}).get("qty") or config.AUTO_ORDER[sig["index"]]["qty"],
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
             "c_sl": (sig.get("app_rules") or {}).get("c_sl", ""), "c_tgt": (sig.get("app_rules") or {}).get("c_tgt", ""),
-            "c_done": "",
+            "c_done": "", "sq": "",
         }
         self.order_log.append(row)
         self._save_order_row(row)
@@ -546,7 +547,8 @@ class Engine:
             why = f"opponent {opp} closed {ev['opp_close']:.2f} at {ev['fail_time']}"
             if row is None:
                 continue
-            already = isinstance(row.get("exit"), (int, float)) or trade_tracker._f(row.get("exit")) is not None
+            already = isinstance(row.get("exit"), (int, float)) or trade_tracker._f(row.get("exit")) is not None \
+                or self.squared_off(row)
             if already:
                 self.log(f"Pair {CommonWatch.pair_title(ev)}: {why}, but the order had already exited - nothing to do.")
                 status = "not needed"
@@ -721,7 +723,7 @@ class Engine:
                 if r["id"] in updates:
                     u = updates[r["id"]]
                     hit = u.pop("custom_hit", None)
-                    if hit and r.get("status") == "SENT" and not r.get("c_done"):
+                    if hit and r.get("status") == "SENT" and not r.get("c_done") and not self.squared_off(r):
                         custom_exits.append((r, hit))
                     if u.pop("exit_new", False):
                         u["detail"] = f"{r.get('detail', '')} | Exit: {u['exit_reason']} {u['exit_time']}".strip(" |")
@@ -744,11 +746,103 @@ class Engine:
                 self._rewrite_orders_file()
             self.bump("orders")
 
+    # ------------------------------------------------------------------ manual square-off
+    @staticmethod
+    def squared_off(r) -> bool:
+        """A manual square-off was sent (live) or recorded (dry run) for this order."""
+        return str(r.get("sq") or "").startswith(("SENT", "DRY RUN"))
+
+    def is_open(self, r) -> bool:
+        """Order still holds a position as far as the app knows: placed, no exit yet, not squared off."""
+        return (r.get("status") in ("SENT", "DRY RUN") and trade_tracker._f(r.get("exit")) is None
+                and not self.squared_off(r) and not str(r.get("c_done") or "").endswith(("SENT", "DRY RUN"))
+                and "Square-off SENT" not in str(r.get("detail") or ""))
+
+    def open_on_option(self, index, strike, opt, exclude_id=None) -> list:
+        """Open orders on the same option (AlgoDelta's squareoff_position closes all of them together)."""
+        try:
+            k = int(float(strike))
+        except (TypeError, ValueError):
+            return []
+        return [o for o in self.order_log if o["id"] != exclude_id and o.get("index") == index
+                and o.get("opt") == opt and int(float(o.get("strike") or 0)) == k and self.is_open(o)]
+
+    @staticmethod
+    def order_label(o) -> str:
+        return f"#{o['id']} {o.get('kind', 'Opening candle')} {o.get('time', '')}"
+
+    async def _exit_ltp(self, o):
+        """LTP for a dry-run manual exit: a fresh Upstox quote, else the cards' / tracker's last LTP."""
+        try:
+            expiries = {n: self.monitors[n].expiry for n in self.monitors}
+            ik = await run.io_bound(trade_tracker._instrument_key, self.client, o, expiries)
+            if ik and self.connected:
+                ltps, _err = await run.io_bound(self.client.fetch_ltp, [ik])
+                v = (ltps or {}).get(ik) or (ltps or {}).get(ik.replace("|", ":"))
+                if v is not None:
+                    return round(float(v), 2)
+        except Exception:
+            pass
+        for v in (self.option_ltp.get((o.get("index"), int(float(o.get("strike") or 0)), o.get("opt"))),
+                  trade_tracker._f(o.get("ltp_live")), trade_tracker._f(o.get("entry")), trade_tracker._f(o.get("ltp"))):
+            if v is not None:
+                return round(float(v), 2)
+        return None
+
+    async def square_off(self, order_id, reason="Manual square-off"):
+        """Sends AlgoDelta's squareoff_position for the order's option. It closes the WHOLE position on that
+        option, so every open order on it is marked. Not blocked by Pause algo / the daily limit.
+        Live: SENT, then Exit / P&L come from the Upstox trade book (refreshed at once). Dry run: Exit = LTP now."""
+        o = next((x for x in self.order_log if x["id"] == order_id), None)
+        if not o or not (self.is_open(o) or str(o.get("sq") or "").startswith("FAILED")):
+            return None
+        group = [o] + self.open_on_option(o["index"], o["strike"], o["opt"], exclude_id=o["id"])
+        mon = self.monitors.get(o["index"])
+        res = await run.io_bound(order_bridge.send_squareoff, o["index"], o["opt"], o["strike"],
+                                 o.get("expiry") or (mon.expiry if mon else None), reason)
+        t = _stamp()
+        self.log(res["message"])
+        ltp = None
+        if any(x.get("status") == "DRY RUN" for x in group):
+            ltp = await self._exit_ltp(o)
+        for x in group:
+            if x.get("status") == "DRY RUN":
+                x["sq"] = f"DRY RUN {t}"
+                if ltp is not None:
+                    x.update(exit=ltp, exit_time=t[:5], exit_reason=reason)
+                note = f"{reason} {t} (dry run" + (f", exit {ltp}" if ltp is not None else "") + ")"
+            else:
+                x["sq"] = {"sent": f"SENT {t}", "failed": f"FAILED {t}"}.get(res["status"], f"NOT SENT (dry run) {t}")
+                note = f"{reason} {t}: square-off " + x["sq"].rsplit(" ", 1)[0]
+            x["detail"] = f"{x.get('detail', '')} | {note}".strip(" |")
+        others = f" (also closes {', '.join(self.order_label(x) for x in group[1:])})" if len(group) > 1 else ""
+        self.notify(f"{o['index']} {o['strike']}{o['opt']}: {reason} "
+                    f"{ORDER_STATUS.get(res['status'], res['status'].upper())}{others}",
+                    {"sent": "warning", "dry_run": "info"}.get(res["status"], "negative"),
+                    f"{o['index']} square-off {o['strike']}{o['opt']}")
+        self._rewrite_orders_file()
+        if res["status"] == "sent":
+            self._trades_at = 0.0                       # fetch the exit fill now instead of in up to 30 s
+            await self.refresh_order_tracking()
+        self.bump("orders", "watch")
+        return res
+
+    async def square_off_all(self):
+        """One squareoff_position per option that has an open order."""
+        done, results = set(), []
+        for o in list(self.order_log):
+            key = (o.get("index"), o.get("opt"), str(o.get("strike")))
+            if key in done or not self.is_open(o):
+                continue
+            done.add(key)
+            results.append(await self.square_off(o["id"], "Square off all"))
+        return [r for r in results if r]
+
     # ------------------------------------------------------------------ per-order SL / Target (Order Details)
     @staticmethod
     def order_rule_editable(r) -> bool:
         return (r.get("status") in ("SENT", "DRY RUN") and r.get("kind", "Opening candle") != "Opening candle"
-                and trade_tracker._f(r.get("exit")) is None and not r.get("c_done"))
+                and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
 
     def set_order_custom(self, row_id, kind, rule):
         """Sets (rule) or clears (None) an order's own SL / Target after it was placed. Watched by the app;
