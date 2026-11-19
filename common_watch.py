@@ -117,6 +117,22 @@ class CommonWatch:
         self.save()
         return row
 
+    def add_manual(self, strike: int, opt: str, lots: int, entry_price=None, now=None) -> dict:
+        """Manual Entry card (source "manual"): no trigger condition, ready to order at once. Entry price None =
+        market at the click; a price = the app waits for the LTP (same as any card's entry price)."""
+        now = now or datetime.now(IST)
+        self._roll_day(now)
+        self._seq += 1
+        row = {"id": self._seq, "index": self.index, "strike": int(strike), "opt": opt,
+               "price": float(entry_price or 0), "tf": 1, "added_at": now.isoformat(), "status": "triggered",
+               "source": "manual", "baseline": "manual", "last_done": None, "prev_close": None,
+               "last_close": None, "last_time": "", "trig_time": now.strftime("%H:%M"), "trig_close": None,
+               "fail_time": "", "fail_close": None, "order_status": "", "qty": int(lots),
+               "entry_price": round(float(entry_price), 2) if entry_price else None, "entry_dir": None}
+        self.rows.append(row)
+        self.save()
+        return row
+
     def sync_star_failures(self, support: dict) -> bool:
         """Marks \u2b50 rows FAILED when their BEP Support board row (same strike, leg and time) has turned red."""
         changed = False
@@ -226,7 +242,7 @@ class CommonWatch:
                 triggered.extend(fired)
                 changed = changed or ch
                 continue
-            if r["status"] == "failed" or r.get("source") == "star":
+            if r["status"] == "failed" or r.get("source") in ("star", "manual"):
                 continue
             tf = timedelta(minutes=r["tf"])
             ref = now - FINALIZE_DELAY
@@ -364,6 +380,8 @@ class CommonWatch:
                          + (f"; square-off {r['squareoff']}" if r.get("squareoff") else ""))
             return text
 
+        if r.get("source") == "manual":
+            return f"Manual entry added {r['trig_time']}"
         if r.get("source") == "star":
             text = f"\u2b50 support at {r['trig_time']}, close {r['trig_close']:.2f}"
             if r["status"] == "failed":

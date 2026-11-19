@@ -97,6 +97,8 @@ def _describe(sig: dict) -> str:
         return f"{head} [manual, \u2b50 support, BEP {sig['bep']:.2f}] (LTP {sig['ltp']:.2f})"
     if sig.get("kind") == "pair":
         return f"{head} [manual, pair @ {sig['bep']:g}] (LTP {sig['ltp']:.2f})"
+    if sig.get("kind") == "manual":
+        return f"{head} [manual entry] (LTP {sig['ltp']:.2f})"
     if sig.get("kind") == "common":
         return f"{head} [manual, common price {sig['bep']:g}] (LTP {sig['ltp']:.2f})"
     return f"{head} [opening candle] (BEP {sig['bep']:.2f}, LTP {sig['ltp']:.2f})"

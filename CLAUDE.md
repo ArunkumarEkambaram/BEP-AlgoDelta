@@ -99,5 +99,13 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - **After a square-off:** pair opponent exits and app-watched CANDLE/custom rules are skipped (`engine.squared_off`).
   - **Saved:** `sq` is stored in the orders file.
   - **Verified by the user:** AlgoDelta's square-off closes the position, including its pending SL/Target.
+- **Manual Entry (PR #17):**
+  - A 4th Order Management sub-page, `/order-management/manual-entry`, with rows of source `manual`.
+  - **Form:** Strike, CE/PE, Lots, **Price / Market** and Entry price (pre-filled with the live LTP from `engine.quote_option`).
+  - **Buttons:** **Add card** (set Target/SL/Trail on the card, then ⚡) or **Add & place** (uses the defaults).
+  - The card is ready at once (TRIGGERED, no candle checks). **Price** reuses the PENDING entry logic; **Market** sends `strategy_order` now. AlgoDelta holds the SL, Target and trail.
+  - Setup has a **Manual entry** default target (`tgt_manual`).
+  - **Limit mode (`limit_order`) is deferred** until the user has their own static IP. Since 1 April 2026, Upstox order APIs (place/modify/**cancel**) need a static IP registered in the user's own Upstox app. AlgoDelta's IP can't be used because it's their server's. With a static IP, an "Upstox direct" mode could offer real limit orders, modify, cancel and per-order square-off.
+  - The user is checking AlgoDelta's Syntax Generator for an entry-price field in `strategy_order`. If one exists, the Price mode could send it directly.
 - **Target fix (PR #15):** rows no longer copy the Setup target when they're added (the old `_stamp_target`). The default Target is read from Setup **when the order is placed**, so a Setup change applies to existing rows too.
 - Ideas offered but not built: a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup).
