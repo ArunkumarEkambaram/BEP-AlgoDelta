@@ -36,6 +36,11 @@ def _expiry_code(expiry) -> str:
         return ""
 
 
+def symbol(index, expiry, strike, opt) -> str:
+    """AlgoDelta script name, e.g. NIFTY26NOV2625400CE (same format the order JSON uses)."""
+    return f"{index}{_expiry_code(expiry)}{int(strike)}{opt}"
+
+
 def _num(value, default):
     try:
         f = float(value)

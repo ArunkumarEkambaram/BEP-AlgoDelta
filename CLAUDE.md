@@ -17,7 +17,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - `app.py`: NiceGUI **single-page app** (`ui.sub_pages`), dark theme with a toggle, a header (LTP, status, Upstox ✓, DRY RUN/LIVE, Pause alerts, Pause algo) and a left nav. The pages are:
   - **Dashboard**
   - **BEP Support**
-  - **Order Management**: a nav group with three sub-pages, each with its own Add form and list. They are `/order-management/same-strike`, `/order-management/pair` and `/order-management/bep-star`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`.
+  - **Order Management**: a nav group with three sub-pages, each with its own Add form and list. They are `/order-management/same-strike`, `/order-management/pair` and `/order-management/bep-star`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`. Each row is an **order card** (like AlgoDelta's): a header with symbol/Buy/INTRADAY/TF, a status chip (WAITING, TRIGGERED, ORDERED · SENT/DRY RUN, EXITED, FAILED) and ⚡ Place / ✕ Delete / ✏ Edit (WAITING only). The body shows Entry Price, Quantity (lots, editable per card until ordered), P&L, live LTP, Entry level, Target, Stoploss and Trailing (Setup's, read-only). A "Compact view" switch brings back the table. Live option LTP comes from `engine.refresh_option_ltps` (one batched call every `OPTION_LTP_SECONDS` = 2 s). Each card is linked to its order through `order_id`, which supplies Entry and P&L.
   - **Order Details**
   - **Setup**
   - **Logs**
@@ -78,4 +78,5 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - Not yet tested during market hours or against the real AlgoDelta webhook: `market-quote/ohlc`, the pre-open index value, `get-trades-for-day` fields, and 3-min candles. Test live with quantity 1 first.
 - Merged branches are still on GitHub: `claude/dry-run-exit`, `claude/first-candle-fifo`, `claude/order-mgmt-sections`, `claude/pair-watch`, `claude/per-order-sl-target`, `claude/per-type-targets`. Delete them with:
   `git push origin --delete claude/dry-run-exit claude/first-candle-fifo claude/order-mgmt-sections claude/pair-watch claude/per-order-sl-target claude/per-type-targets`
+- **Next (PR B, agreed):** per-order Trailing SL on the card (popup; defaults from Setup), and Set Start Time / Set End Time (no trigger before the start; after the end the row is EXPIRED; no square-off, and 15:15 stays).
 - Ideas offered but not built: a manual pre-open override; an AlgoDelta exit webhook for other features; making trailing SL per order.

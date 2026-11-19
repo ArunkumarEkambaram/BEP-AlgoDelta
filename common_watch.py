@@ -178,6 +178,31 @@ class CommonWatch:
         self.save()
         return True
 
+    def set_qty(self, row_id: int, lots: int) -> bool:
+        """Row's own quantity in lots (default: Setup). Locked once ordered."""
+        r = self.get(row_id)
+        if not r or r.get("order_status") in ("SENT", "DRY RUN", "sending") or int(lots) < 1:
+            return False
+        r["qty"] = int(lots)
+        self.save()
+        return True
+
+    def edit(self, row_id: int, tf: int, price: float = None, pe_price: float = None, buffer: float = None) -> bool:
+        """Changes a WAITING row's level / timeframe (pair: CE price, PE price, buffer) and restarts its check from
+        the candles before it was added (same baseline rule as a new row). Not for \u2b50 rows."""
+        r = self.get(row_id)
+        if not r or r["status"] != "watching" or r.get("source") == "star" or r.get("order_status"):
+            return False
+        r.update(tf=int(tf), baseline=None)
+        if r.get("kind") == "pair":
+            r.update(ce_price=float(price), pe_price=float(pe_price if pe_price is not None else price),
+                     buffer=float(buffer if buffer is not None else r["buffer"]))
+            r["legs"] = {o: {"prev_close": None, "last_close": None, "last_done": None} for o in ("CE", "PE")}
+        else:
+            r.update(price=float(price), last_done=None, prev_close=None)
+        self.save()
+        return True
+
     def set_order_status(self, row_id: int, status: str):
         r = self.get(row_id)
         if r:
