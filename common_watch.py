@@ -117,9 +117,10 @@ class CommonWatch:
         self.save()
         return row
 
-    def add_manual(self, strike: int, opt: str, lots: int, entry_price=None, now=None) -> dict:
+    def add_manual(self, strike: int, opt: str, lots: int, entry_price=None, now=None, mode: str = None) -> dict:
         """Manual Entry card (source "manual"): no trigger condition, ready to order at once. Entry price None =
-        market at the click; a price = the app waits for the LTP (same as any card's entry price)."""
+        market at the click; a price = the app waits for the LTP (same as any card's entry price).
+        mode "limit" = an AlgoDelta limit_order at the price, SL / Target watched by the app (limit_orders.py)."""
         now = now or datetime.now(IST)
         self._roll_day(now)
         self._seq += 1
@@ -128,7 +129,8 @@ class CommonWatch:
                "source": "manual", "baseline": "manual", "last_done": None, "prev_close": None,
                "last_close": None, "last_time": "", "trig_time": now.strftime("%H:%M"), "trig_close": None,
                "fail_time": "", "fail_close": None, "order_status": "", "qty": int(lots),
-               "entry_price": round(float(entry_price), 2) if entry_price else None, "entry_dir": None}
+               "entry_price": round(float(entry_price), 2) if entry_price else None, "entry_dir": None,
+               "entry_mode": "limit" if mode == "limit" else None}
         self.rows.append(row)
         self.save()
         return row
@@ -381,7 +383,8 @@ class CommonWatch:
             return text
 
         if r.get("source") == "manual":
-            return f"Manual entry added {r['trig_time']}"
+            return ("Manual LIMIT entry" if r.get("entry_mode") == "limit" else "Manual entry") \
+                + f" added {r['trig_time']}"
         if r.get("source") == "star":
             text = f"\u2b50 support at {r['trig_time']}, close {r['trig_close']:.2f}"
             if r["status"] == "failed":

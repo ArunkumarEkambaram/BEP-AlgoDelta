@@ -17,6 +17,7 @@ from nicegui import run
 import bep
 import config
 import exit_rules
+import limit_orders
 import market_utils
 import notifier
 import order_bridge
@@ -28,7 +29,7 @@ from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
-                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq"]
+                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq", "mg"]
 ORDER_LOCKED = ("SENT", "DRY RUN", "sending")
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
@@ -67,6 +68,8 @@ class Engine:
         self._scan_busy = False
         self._open_busy = False
         self._trades_at = 0.0
+        self._book_at = 0.0                                  # last Upstox order-book read (limit orders)
+        self._limit_busy = False
         self.order_log = self._load_orders_today()
         self._restore_side_locks()
         self.log(f"App started. {self.settings_status} Dry run is ON.")
@@ -117,6 +120,7 @@ class Engine:
                 r.setdefault(k, "--")
             r.setdefault("ltp_live", "")
             r.setdefault("sq", "")
+            r.setdefault("mg", "")
         return rows
 
     def _restore_side_locks(self):
@@ -173,7 +177,7 @@ class Engine:
             "qty": (sig.get("params") or {}).get("qty") or config.AUTO_ORDER[sig["index"]]["qty"],
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
             "c_sl": (sig.get("app_rules") or {}).get("c_sl", ""), "c_tgt": (sig.get("app_rules") or {}).get("c_tgt", ""),
-            "c_done": "", "sq": "",
+            "c_done": "", "sq": "", "mg": sig.get("mg", ""),
         }
         self.order_log.append(row)
         self._save_order_row(row)
@@ -370,6 +374,10 @@ class Engine:
                     wanted.update({(name, r["ce_strike"], "CE"), (name, r["pe_strike"], "PE")})
                 elif r.get("strike") is not None:
                     wanted.add((name, int(r["strike"]), r["opt"]))
+        for o in self.order_log:                     # limit orders keep their live LTP even if the card is deleted
+            m = limit_orders.parse(o.get("mg"))
+            if m and o.get("index") in self.monitors and (limit_orders.pending(m) or self.is_open(o)):
+                wanted.add((o["index"], int(float(o["strike"])), o["opt"]))
         if not wanted:
             return
         self._opt_ltp_busy = True
@@ -401,6 +409,15 @@ class Engine:
         self.watches[name].remove(row_id)
         self.bump("watch")
 
+    async def delete_watch(self, name, row_id):
+        """Deletes a card. A limit order still open at the exchange is cancelled first (cancel_order); an app-side
+        pending entry simply stops. A placed order stays in Order Details (its app SL / Target keep running)."""
+        r = self.watches[name].get(row_id)
+        o = self.row_order(r) if r else None
+        if o is not None and limit_orders.cancellable(limit_orders.parse(o.get("mg"))):
+            await self.cancel_limit(o["id"], "Card deleted")
+        self.remove_watch(name, row_id)
+
     # ------------------------------------------------------------------ entry at a price (Order Management cards)
     @staticmethod
     def _row_key(name, r):
@@ -428,10 +445,11 @@ class Engine:
             self.log(f"{name} {strike}{opt} quote error: {ex}")
         return self.option_ltp.get((name, int(strike), opt))
 
-    def add_manual(self, name, strike, opt, lots, entry_price=None):
-        r = self.watches[name].add_manual(strike, opt, lots, entry_price, _now())
+    def add_manual(self, name, strike, opt, lots, entry_price=None, mode=None):
+        r = self.watches[name].add_manual(strike, opt, lots, entry_price, _now(), mode)
         self.log(f"{name} Manual Entry added: {strike}{opt}, {lots} lot(s), "
-                 + (f"entry at {entry_price:.2f}" if entry_price else "market") + ".")
+                 + (f"LIMIT at {entry_price:.2f}" if mode == "limit" else
+                    f"entry at {entry_price:.2f}" if entry_price else "market") + ".")
         self.bump("watch")
         return r
 
@@ -441,6 +459,8 @@ class Engine:
         cw = self.watches[name]
         r = cw.get(row_id)
         if not r or r.get("order_status") in ORDER_LOCKED + ("PENDING",):
+            return False
+        if r.get("entry_mode") == "limit" and not price:       # a limit card always needs its price
             return False
         r["entry_price"] = round(float(price), 2) if price else None
         r["entry_dir"] = direction if r["entry_price"] else None
@@ -519,6 +539,7 @@ class Engine:
         await self.refresh_option_ltps()
         if self.connected and market_utils.is_market_open():
             await self.check_pending_entries()
+            await self.check_limits()
 
     async def place_watch_order(self, name, row_id, fill_ltp=None, entry_note=""):
         """Sends the card's order now (market). Signal LTP = the live LTP at the click / at the price hit (dry-run
@@ -787,7 +808,11 @@ class Engine:
         return str(r.get("sq") or "").startswith(("SENT", "DRY RUN"))
 
     def is_open(self, r) -> bool:
-        """Order still holds a position as far as the app knows: placed, no exit yet, not squared off."""
+        """Order still holds a position as far as the app knows: placed, no exit yet, not squared off.
+        A limit order holds one only once something is filled."""
+        m = limit_orders.parse(r.get("mg"))
+        if m is not None and not limit_orders.held(m):
+            return False
         return (r.get("status") in ("SENT", "DRY RUN") and trade_tracker._f(r.get("exit")) is None
                 and not self.squared_off(r) and not str(r.get("c_done") or "").endswith(("SENT", "DRY RUN"))
                 and "Square-off SENT" not in str(r.get("detail") or ""))
@@ -831,6 +856,9 @@ class Engine:
         if not o or not (self.is_open(o) or str(o.get("sq") or "").startswith("FAILED")):
             return None
         group = [o] + self.open_on_option(o["index"], o["strike"], o["opt"], exclude_id=o["id"])
+        for x in group:                                 # a partly filled limit order: cancel the rest first
+            if limit_orders.cancellable(limit_orders.parse(x.get("mg"))):
+                await self.cancel_limit(x["id"], "Before square-off")
         mon = self.monitors.get(o["index"])
         res = await run.io_bound(order_bridge.send_squareoff, o["index"], o["opt"], o["strike"],
                                  o.get("expiry") or (mon.expiry if mon else None), reason)
@@ -872,9 +900,273 @@ class Engine:
             results.append(await self.square_off(o["id"], "Square off all"))
         return [r for r in results if r]
 
+    # ------------------------------------------------------------------ Manual Entry LIMIT orders (limit_orders.py)
+    def _limit_rules(self, name, r):
+        """(sl, tgt, trail, app_rules) for a limit card. LTP / POINT SL and Target (the card's own, else Setup) and
+        the trailing SL are watched by the app on the live LTP; a CANDLE rule goes to c_sl / c_tgt instead (checked
+        on candle closes, like any app-watched rule; no trailing with a CANDLE SL)."""
+        cfg = config.AUTO_ORDER[name]
+        defaults = {"sl": (cfg.get("sl_type", "POINT"), cfg.get("sl")), "tgt": self.row_target(name, r)}
+        out, app_rules = {}, {}
+        for k in ("sl", "tgt"):
+            rule = exit_rules.parse(r.get("c_" + k))
+            if rule is None:
+                t, v = defaults[k]
+                try:
+                    rule = exit_rules.make_rule(k, t if t in ("LTP", "POINT") else "POINT", float(v), custom=False)
+                except (TypeError, ValueError):
+                    rule = None
+            if rule and rule["type"] == "CANDLE":
+                app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
+                out[k] = None
+            else:
+                out[k] = {"type": rule["type"], "value": float(rule["value"])} if rule else None
+        tr = self.row_trail(name, r)
+        trail = {"trigger": float(tr["trigger"]), "gap": float(tr["gap"]), "step": float(tr["point"] or 1)} \
+            if tr["on"] and out["sl"] else None
+        return out["sl"], out["tgt"], trail, app_rules
+
+    def _limit_save(self, o, m):
+        o["mg"] = limit_orders.dump(m)
+
+    @staticmethod
+    def _opt_key(o):
+        try:
+            return o["index"], int(float(o["strike"])), o["opt"]
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def cancel_side_effects(self, o) -> list:
+        """Other orders on the same option that AlgoDelta's cancel_order (no order id) may also hit: other open
+        limit orders, and open strategy orders whose SL / Target orders wait at the broker."""
+        k = self._opt_key(o)
+        out = []
+        for x in self.order_log:
+            if x["id"] == o["id"] or self._opt_key(x) != k:
+                continue
+            mx = limit_orders.parse(x.get("mg"))
+            if (mx is None and self.is_open(x)) or limit_orders.pending(mx):
+                out.append(x)
+        return out
+
+    def limit_active(self) -> dict:
+        """Counts for the header banner: limit orders waiting at the exchange / positions protected by the app."""
+        waiting = held = 0
+        for o in self.order_log:
+            m = limit_orders.parse(o.get("mg"))
+            if m and limit_orders.pending(m) and not limit_orders.held(m):
+                waiting += 1
+            elif m and self.is_open(o):
+                held += 1
+        return {"waiting": waiting, "held": held}
+
+    async def place_limit_order(self, name, row_id):
+        """Sends the card's AlgoDelta limit_order (BUY at its price). The SL / Target / trailing SL are kept on the
+        order row and watched by the app (check_limits). Pause algo / dry run / the daily limit apply."""
+        cw, mon = self.watches[name], self.monitors[name]
+        r = cw.get(row_id)
+        if not r or r["status"] != "triggered" or r.get("order_status") in ORDER_LOCKED:
+            return None
+        price = r.get("entry_price")
+        if not price:
+            self.notify(f"{name} {r['strike']}{r['opt']}: set the limit price first.", "warning")
+            return None
+        price = float(price)
+        ltp = self.row_live_ltp(name, r)
+        if ltp is None:
+            ltp = await self.quote_option(name, r["strike"], r["opt"])
+        sl, tgt, trail, app_rules = self._limit_rules(name, r)
+        lots = self.row_qty(name, r)
+        t = _stamp()
+        sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "price": price, "bep": price,
+               "ltp": float(ltp if ltp is not None else price),
+               "entry_note": f"LIMIT {price:.2f}" + (f", LTP {ltp:.2f} at the click" if ltp is not None else ""),
+               "expiry": mon.expiry, "order_type": "limit_order", "kind": "manual",
+               "kind_label": "Manual entry — limit", "time": t, "params": {"qty": lots}, "app_rules": app_rules}
+        r["pending"] = None
+        cw.set_order_status(row_id, "sending")
+        self.bump("watch")
+        res = await run.io_bound(order_bridge.send_limit, sig)
+        if res["status"] in ("sent", "dry_run"):
+            m = {"price": price, "units": lots * config.INDEXES[name]["lot_size"], "state": "OPEN",
+                 "msg": "Sent, waiting for the fill", "sent_at": t, "oid": None, "filled": 0, "fill": None,
+                 "fill_time": "", "sl": sl, "tgt": tgt, "trail": trail, "high": None, "cancel_ts": None, "exit": ""}
+            if res["status"] == "dry_run":
+                m["msg"] = "Dry run: fills when the LTP is at or below the price"
+                if ltp is not None and ltp <= price:      # marketable limit: a real one fills at once, near the LTP
+                    limit_orders.dry_fill(m, ltp, t)
+                    m.update(fill=round(ltp, 2), high=round(ltp, 2),
+                             msg=f"Filled at once at {ltp:.2f} (dry run; the LTP was already below the limit)")
+            sig["mg"] = limit_orders.dump(m)
+        cw.set_order_status(row_id, ORDER_STATUS.get(res["status"], res["status"]))
+        self.log(res["message"])
+        self.add_order_row(sig, res)
+        r["order_id"] = self.order_log[-1]["id"]
+        cw.save()
+        self.bump("watch")
+        st = ORDER_STATUS.get(res["status"], res["status"].upper())
+        self.notify(f"{name} {r['strike']}{r['opt']}: LIMIT {price:.2f} {st}"
+                    + (" - SL / Target are watched by the app (keep this PC on)." if res["status"] in ("sent", "dry_run")
+                       else f" - {res['detail']}"),
+                    {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
+                    f"{name} limit {r['strike']}{r['opt']}")
+        return res
+
+    async def cancel_limit(self, order_id, reason="Cancelled by you"):
+        """Sends AlgoDelta cancel_order for a limit order still open at the exchange (or CANCEL FAILED: retry).
+        Live: CANCEL SENT, then the Upstox order book confirms it (else CANCEL FAILED after
+        LIMIT_CANCEL_CONFIRM_SECONDS). Dry run: CANCELLED at once. Not blocked by Pause algo / the daily limit."""
+        o = next((x for x in self.order_log if x["id"] == order_id), None)
+        if not o or not limit_orders.cancellable(limit_orders.parse(o.get("mg"))):
+            return None
+        mon = self.monitors.get(o["index"])
+        side = self.cancel_side_effects(o)
+        res = await run.io_bound(order_bridge.send_cancel, o["index"], o["opt"], o["strike"],
+                                 o.get("expiry") or (mon.expiry if mon else None), reason)
+        self.log(res["message"])
+        if side:
+            self.log(f"WARNING: cancel_order has no order id - it may also cancel the pending orders of "
+                     + ", ".join(self.order_label(x) for x in side) + f" on {o['strike']}{o['opt']}.")
+        t = _stamp()
+        m = limit_orders.parse(o.get("mg"))                 # fresh: it may have changed while sending
+        kept = f"; {m['filled']} filled at {m['fill']:.2f} stay protected" if limit_orders.held(m) else ""
+        if o.get("status") == "DRY RUN":
+            m.update(state="CANCELLED", msg=f"Cancelled {t} ({reason}, dry run){kept}")
+        elif res["status"] == "sent":
+            m.update(state="CANCEL SENT", cancel_ts=datetime.now().timestamp(),
+                     msg=f"cancel_order sent {t} ({reason}); waiting for Upstox to confirm")
+            self._book_at = 0.0                              # read the order book at the next tick
+        else:
+            m.update(state="CANCEL FAILED",
+                     msg=f"cancel_order {ORDER_STATUS.get(res['status'], res['status']).upper()} {t}: {res['detail']}")
+        self._limit_save(o, m)
+        o["detail"] = f"{o.get('detail', '')} | Cancel ({reason}) {t}: {m['state']}".strip(" |")
+        self._rewrite_orders_file()
+        self.notify(f"{o['index']} {o['strike']}{o['opt']}: limit {m['price']:.2f} - {m['state']} ({reason}){kept}",
+                    {"CANCELLED": "info", "CANCEL SENT": "warning"}.get(m["state"], "negative"),
+                    f"{o['index']} cancel {o['strike']}{o['opt']}")
+        self.bump("orders", "watch")
+        return res
+
+    def _limit_event(self, o, m, events):
+        what = f"{o['index']} {o['strike']}{o['opt']}"
+        for ev in events:
+            if ev == "filled":
+                self._trades_at = 0.0                    # fetch the fill from the trade book at the next scan
+                note = f"LIMIT FILLED {m['filled']} at {m['fill']:.2f}"
+                o["detail"] = f"{o.get('detail', '')} | {note} {m.get('fill_time', '')}".strip(" |")
+                self.log(f"{what}: {note} - app SL / Target active ({limit_orders.describe(m) or 'none set'}).")
+                self.notify(f"{what}: {note} - app SL / Target active.", "positive", f"{o['index']} limit filled")
+            elif ev == "more":
+                self.log(f"{what}: limit now {m['filled']} filled, average {m['fill']:.2f}.")
+            elif ev == "cancelled":
+                self.log(f"{what}: limit order CANCELLED ({m['msg']}).")
+                self.notify(f"{what}: limit {m['price']:.2f} cancelled.", "info")
+            elif ev == "rejected":
+                o["detail"] = f"{o.get('detail', '')} | {m['msg']}".strip(" |")
+                self.log(f"{what}: limit order {m['msg']}")
+                self.notify(f"{what}: limit order {m['msg']}", "negative", f"{o['index']} limit rejected")
+
+    async def check_limits(self, now=None):
+        """Every OPTION_LTP_SECONDS in market hours: follows the limit orders and protects their fills.
+        Live: reads the Upstox order book (every LIMIT_POLL_SECONDS while one is open / being cancelled).
+        Dry run: fills at the price once the LTP is at or below it. Then the app's SL / Target / trailing SL are
+        checked on the live LTP and a hit sends squareoff_position (once). At 15:15: open limits are cancelled and
+        filled ones squared off."""
+        if self._limit_busy or not any(o.get("mg") for o in self.order_log):
+            return
+        self._limit_busy = True
+        dirty = False
+        try:
+            now = now or _now()
+            t, ts = _stamp(), datetime.now().timestamp()
+            eod = now >= now.replace(hour=exit_rules.EXIT_TIME.hour, minute=exit_rules.EXIT_TIME.minute,
+                                     second=0, microsecond=0)
+
+            def mine(pred):
+                return [o for o in self.order_log if pred(o, limit_orders.parse(o.get("mg")))]
+
+            # 1. live orders: the Upstox order book
+            live = mine(lambda o, m: m and o.get("status") == "SENT" and limit_orders.pending(m))
+            if live and ts - self._book_at >= config.LIMIT_POLL_SECONDS:
+                self._book_at = ts
+                book, err = await run.io_bound(self.client.fetch_order_book)
+                if book is None:
+                    self.log(f"Upstox order book unavailable ({err}); limit orders not updated.")
+                else:
+                    expiries = {n: self.monitors[n].expiry for n in self.monitors}
+                    taken = {limit_orders.parse(o["mg"]).get("oid") for o in mine(lambda o, m: m and m.get("oid"))}
+                    for o in live:
+                        m = limit_orders.parse(o.get("mg"))
+                        ik = await run.io_bound(trade_tracker._instrument_key, self.client, o, expiries)
+                        hit = limit_orders.match_order(book, m, ik, taken - {m.get("oid")})
+                        if hit is None:
+                            continue
+                        taken.add(hit.get("order_id"))
+                        before = limit_orders.dump(m)
+                        events = limit_orders.apply_book(m, hit, t)
+                        if limit_orders.dump(m) != before:
+                            self._limit_save(o, m)
+                            dirty = True
+                        self._limit_event(o, m, events)
+
+            # 2. a cancel Upstox has not confirmed in time
+            for o in mine(lambda o, m: m and m.get("state") == "CANCEL SENT" and m.get("cancel_ts")):
+                m = limit_orders.parse(o["mg"])
+                if ts - m["cancel_ts"] >= config.LIMIT_CANCEL_CONFIRM_SECONDS:
+                    m.update(state="CANCEL FAILED",
+                             msg="Cancel not confirmed by Upstox - Retry cancel, or cancel it in Upstox")
+                    self._limit_save(o, m)
+                    dirty = True
+                    self.log(f"{o['index']} {o['strike']}{o['opt']}: {m['msg']}")
+                    self.notify(f"{o['index']} {o['strike']}{o['opt']}: {m['msg']}", "negative",
+                                f"{o['index']} cancel failed")
+
+            # 3. dry run fills
+            for o in mine(lambda o, m: m and o.get("status") == "DRY RUN" and m.get("state") == "OPEN"):
+                m = limit_orders.parse(o["mg"])
+                if limit_orders.dry_fill(m, self.option_ltp.get(self._opt_key(o)), t):
+                    self._limit_save(o, m)
+                    dirty = True
+                    self._limit_event(o, m, ["filled"])
+
+            # 4. 15:15: cancel what is still open at the exchange (once)
+            if eod:
+                for o in mine(lambda o, m: limit_orders.cancellable(m) and not m.get("eod_cancel")):
+                    m = limit_orders.parse(o["mg"])
+                    m["eod_cancel"] = True
+                    self._limit_save(o, m)
+                    await self.cancel_limit(o["id"], "15:15")
+
+            # 5. app SL / Target / trailing SL on the live LTP; 15:15 square-off
+            for o in mine(lambda o, m: m and not m.get("exit") and self.is_open(o)):
+                m = limit_orders.parse(o["mg"])
+                ltp = self.option_ltp.get(self._opt_key(o))
+                high = m.get("high")
+                reason = "App 15:15 square-off" if eod else limit_orders.check_exit(m, ltp)
+                if not reason:
+                    if m.get("high") != high:
+                        self._limit_save(o, m)
+                        dirty = True
+                    continue
+                m["exit"] = f"{reason} {t}"
+                self._limit_save(o, m)
+                self.log(f"{o['index']} {o['strike']}{o['opt']}: {reason} hit (LTP {ltp}, "
+                         f"{limit_orders.describe(m)}) - squaring off.")
+                await self.square_off(o["id"], reason)
+        except Exception as ex:
+            self.log(f"Limit order check error: {ex}")
+        finally:
+            self._limit_busy = False
+            if dirty:
+                self._rewrite_orders_file()
+                self.bump("orders", "watch")
+
     # ------------------------------------------------------------------ per-order SL / Target (Order Details)
     @staticmethod
     def order_rule_editable(r) -> bool:
+        if r.get("mg"):                                 # limit order: its rules are the app's own (set on the card)
+            return False
         return (r.get("status") in ("SENT", "DRY RUN") and r.get("kind", "Opening candle") != "Opening candle"
                 and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
 

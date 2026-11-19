@@ -151,15 +151,14 @@ def send_order(sig: dict) -> dict:
         return _res("failed", f"ORDER FAILED {head} -> {ex} (not retried)", payload, f"{ex} (not retried)")
 
 
-def send_squareoff(index: str, opt: str, strike, expiry, reason: str = "") -> dict:
-    """AlgoDelta squareoff_position for one option (used by the pair watch's opponent SL).
-    Not blocked by Pause algo trade or the daily order limit - it only closes a position.
-    Dry run (or no webhook / unconfirmed template) only logs it."""
+def _product(index) -> str:
+    return (config.AUTO_ORDER[index]["templates"].get("strategy_order") or {}).get("product", "INTRADAY")
+
+
+def _post_exit(index: str, payload: dict, head: str) -> dict:
+    """POSTs a square-off / cancel. Not blocked by Pause algo trade or the daily order limit (it only closes or
+    cancels). Dry run (or no webhook / unconfirmed template) only logs it."""
     cfg = config.AUTO_ORDER[index]
-    product = (cfg["templates"].get("strategy_order") or {}).get("product", "INTRADAY")
-    symbol = f"{index}{_expiry_code(expiry)}{int(strike)}{opt}"
-    payload = {"type": "squareoff_position", "script_type": opt, "script": symbol, "product": product}
-    head = f"SQUARE-OFF {symbol}" + (f" ({reason})" if reason else "")
     why = None
     if config.AUTO_ORDER_DRY_RUN:
         why = "dry run"
@@ -177,3 +176,64 @@ def send_squareoff(index: str, opt: str, strike, expiry, reason: str = "") -> di
                     f"HTTP {resp.status_code} {body}")
     except Exception as ex:
         return _res("failed", f"{head} FAILED -> {ex} (not retried)", payload, f"{ex} (not retried)")
+
+
+def send_squareoff(index: str, opt: str, strike, expiry, reason: str = "") -> dict:
+    """AlgoDelta squareoff_position for one option (closes the whole position on it)."""
+    sym = symbol(index, expiry, strike, opt)
+    payload = {"type": "squareoff_position", "script_type": opt, "script": sym, "product": _product(index)}
+    return _post_exit(index, payload, f"SQUARE-OFF {sym}" + (f" ({reason})" if reason else ""))
+
+
+def send_cancel(index: str, opt: str, strike, expiry, reason: str = "") -> dict:
+    """AlgoDelta cancel_order for one option. It has no order id, so it may cancel EVERY pending order on that
+    option (other limit orders, and possibly the broker SL / Target orders of an open strategy order)."""
+    sym = symbol(index, expiry, strike, opt)
+    payload = {"type": "cancel_order", "script_type": opt, "script": sym, "product": _product(index)}
+    return _post_exit(index, payload, f"CANCEL ORDER {sym}" + (f" ({reason})" if reason else ""))
+
+
+def limit_payload(sig: dict) -> dict:
+    """AlgoDelta limit_order (BUY). quantity = lots, like strategy_order. No SL / Target fields."""
+    return {"type": "limit_order", "script_type": sig["opt"],
+            "script": symbol(sig["index"], sig.get("expiry"), sig["strike"], sig["opt"]),
+            "product": _product(sig["index"]),
+            "quantity": max(1, int(_num((sig.get("params") or {}).get("qty"), 1))),
+            "price": _num(round(float(sig["price"]), 2), 0), "transaction_type": "BUY"}
+
+
+def send_limit(sig: dict) -> dict:
+    """Sends a limit_order entry. Same gates as an entry order: Pause algo, dry run, webhook / confirmation and
+    the daily order limit."""
+    cfg = config.AUTO_ORDER[sig["index"]]
+    payload = limit_payload(sig)
+    text = json.dumps(payload)
+    head = f"{sig['index']} {sig['opt']} {sig['strike']} [manual entry, LIMIT {payload['price']}] (LTP {sig['ltp']:.2f})"
+    if config.AUTO_ORDER_PAUSED:
+        return _res("blocked", f"Algo trading is PAUSED; NOT sent: {head}", payload, "Algo trading paused")
+    today = datetime.now().strftime("%Y-%m-%d")
+    if _today["date"] != today:
+        _today.update(date=today, count=0)
+    why = None
+    if config.AUTO_ORDER_DRY_RUN:
+        why = "dry run"
+    elif not cfg["confirmed"]:
+        why = "JSON template not confirmed"
+    elif not cfg["webhook_url"]:
+        why = "no webhook URL set"
+    if why:
+        return _res("dry_run", f"DRY RUN ({why}) {head}: {text}", payload, why)
+    if _today["count"] >= config.AUTO_ORDER_DAILY_LIMIT:
+        return _res("blocked", f"Daily order limit ({config.AUTO_ORDER_DAILY_LIMIT}) reached; NOT sent: {head}", payload,
+                    f"Daily limit ({config.AUTO_ORDER_DAILY_LIMIT}) reached")
+    _today["count"] += 1
+    try:
+        resp = requests.post(cfg["webhook_url"], json=payload, timeout=5)
+        body = (resp.text or "")[:200]
+        if 200 <= resp.status_code < 300:
+            return _res("sent", f"LIMIT ORDER SENT {head} -> HTTP {resp.status_code} {body}", payload,
+                        f"HTTP {resp.status_code} {body}")
+        return _res("failed", f"LIMIT ORDER FAILED {head} -> HTTP {resp.status_code} {body} (not retried)", payload,
+                    f"HTTP {resp.status_code} {body} (not retried)")
+    except Exception as ex:
+        return _res("failed", f"LIMIT ORDER FAILED {head} -> {ex} (not retried)", payload, f"{ex} (not retried)")

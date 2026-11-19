@@ -293,6 +293,21 @@ class UpstoxClient:
         except Exception as e:
             return None, str(e)
 
+    # ---------------------------------------------------------- today's orders (read only)
+    def fetch_order_book(self):
+        """Today's orders in this Upstox account (read only, no static IP needed). Returns (list, None) or
+        (None, error). Each order has order_id, instrument_token, transaction_type, order_type, price, quantity,
+        filled_quantity, average_price, status (open / complete / cancelled / rejected / ...), status_message,
+        order_timestamp."""
+        url = f"{BASE_V2}/order/retrieve-all"
+        try:
+            resp = requests.get(url, headers=self.headers, timeout=10)
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}: {resp.text[:200]}"
+            return resp.json().get("data") or [], None
+        except Exception as e:
+            return None, str(e)
+
 
 def test_connection(access_token: str):
     """Quick sanity check the token works — hits the user profile endpoint."""

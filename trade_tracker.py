@@ -14,12 +14,17 @@ DRY RUN rows: nothing was placed, so entry = the option LTP when the signal fire
               in the order's JSON (see simulate_exit). P&L = points x lots x lot size. Once found, the exit
               is saved in today's orders file. LTP (live) is shown for every tracked row.
 FAILED / BLOCKED rows: never entered a trade; all these columns stay "--".
+Manual Entry LIMIT rows ("mg" column, see limit_orders.py): entry counts from the limit fill (fill time, filled
+              quantity), not from the click. Unfilled = no entry. Their LTP / POINT SL, Target and trailing SL are
+              watched by the engine on the live LTP; only CANDLE rules (c_sl / c_tgt) are checked here, and the
+              dry-run 15:15 exit is the engine's too.
 """
 import json
 from datetime import datetime, time as dtime, timedelta
 
 import config
 import exit_rules
+import limit_orders
 import market_utils
 
 
@@ -56,6 +61,12 @@ def _instrument_key(client, row, expiry_by_index):
     return ik
 
 
+def entry_time(r) -> str:
+    """Time the position was entered: a limit order's first fill, else the order time."""
+    m = limit_orders.parse(r.get("mg"))
+    return (m.get("fill_time") if m else None) or r.get("time", "")
+
+
 def compute(client, rows, expiry_by_index, trades=None, now=None):
     """
     Works out the live columns for every tracked row. Returns ({row_id: fields}, error_or_None).
@@ -87,7 +98,8 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
     if trades is not None:
         by_ik = {}
         for r in tracked:
-            if r["status"] == "SENT" and iks.get(r["id"]):
+            m = limit_orders.parse(r.get("mg"))
+            if r["status"] == "SENT" and iks.get(r["id"]) and (m is None or limit_orders.held(m)):
                 by_ik.setdefault(iks[r["id"]], []).append(r)
         for ik, orders in by_ik.items():
             alloc.update(_allocate(orders, fills.get(ik, {"BUY": [], "SELL": []})))
@@ -100,16 +112,17 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
             ltp = ltp_map.get(ik.replace("|", ":"))
         fields = {"ltp_live": round(ltp, 2) if ltp is not None else _keep(r, "ltp_live")}
 
+        m = limit_orders.parse(r.get("mg"))
         if r["status"] == "DRY RUN":
-            entry = _f(r.get("ltp"))
+            entry = _f(r.get("ltp")) if m is None else (_f(m.get("fill")) if limit_orders.held(m) else None)
             lots = _f(r.get("qty")) or _f(config.AUTO_ORDER.get(r.get("index"), {}).get("qty")) or 1
             qty_units = lots * config.INDEXES.get(r.get("index"), {}).get("lot_size", 1)
             exit_ = _f(r.get("exit"))
-            if exit_ is None and entry is not None and ik:
+            rules = custom_rules(r) if m else base_rules(_params(r)) + custom_rules(r)
+            if exit_ is None and entry is not None and ik and (rules or m is None):
                 candles, _cerr = client.fetch_intraday_candles(ik, 1)
-                res = exit_rules.evaluate(entry, r.get("time", ""), candles or [],
-                                          base_rules(_params(r)) + custom_rules(r),
-                                          now or datetime.now(market_utils.IST), eod=True)
+                res = exit_rules.evaluate(entry, entry_time(r), candles or [], rules,
+                                          now or datetime.now(market_utils.IST), eod=m is None)
                 if res:
                     exit_, exit_time, reason = res
                     fields.update(exit_time=exit_time, exit_reason=reason, exit_new=True)
@@ -124,7 +137,7 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
             rules = custom_rules(r)
             if rules and exit_ is None and entry is not None and not r.get("c_done") and ik:
                 candles, _cerr = client.fetch_intraday_candles(ik, 1)
-                hit = exit_rules.evaluate(entry, r.get("time", ""), candles or [], rules,
+                hit = exit_rules.evaluate(entry, entry_time(r), candles or [], rules,
                                           now or datetime.now(market_utils.IST), eod=False)
                 if hit:
                     fields["custom_hit"] = hit
@@ -192,6 +205,9 @@ def _trade_time(t) -> datetime:
 
 
 def _order_units(r) -> float:
+    m = limit_orders.parse(r.get("mg"))
+    if m and m.get("filled"):
+        return float(m["filled"])
     lots = _f(r.get("qty")) or _f(config.AUTO_ORDER.get(r.get("index"), {}).get("qty")) or 1
     return lots * config.INDEXES.get(r.get("index"), {}).get("lot_size", 1)
 
@@ -199,7 +215,7 @@ def _order_units(r) -> float:
 def _allocate(orders: list, f: dict) -> dict:
     """FIFO: shares one option's BUY / SELL fills between its SENT orders, earliest order first.
     Returns {row_id: {"entry", "bought", "exit"}}; exit only once that order's bought quantity is fully sold."""
-    orders = sorted(orders, key=lambda r: (str(r.get("time", "")), r["id"]))
+    orders = sorted(orders, key=lambda r: (str(entry_time(r)), r["id"]))
     buys = [list(x) for x in f["BUY"]]
     sells = [list(x) for x in f["SELL"]]
 

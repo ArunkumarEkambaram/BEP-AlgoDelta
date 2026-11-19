@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #18; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #19; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -23,13 +23,14 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     - The direction is set automatically from the LTP at arming, and the arrow flips it.
     - It cancels via the button, automatically when the card turns FAILED/EXITED, and at 15:15. Pause algo and the daily limit apply, inside `send_order`.
     - The signal LTP of a manual order (= dry-run Entry) is now the **live LTP at the click or the price hit**, not the candle close.
-    - AlgoDelta `limit_order` (`{"type":"limit_order","script_type","script","product","quantity","price","transaction_type"}`) is kept for a later **Manual Entry** feature. It has no SL/Target fields, and no cancel syntax is known yet.
+    - AlgoDelta's `strategy_order` has **no entry-price field** (checked by the user), so this app-side PENDING logic stays.
   - **Order Details**
   - **Setup**
   - **Logs**
 - `bep_monitor.py`: BEP Support board, ⭐ first support, and the 09:15 opening order (prepare + 1 s tick).
-- `common_watch.py`: Order Management rows (Same strike, Pair, ⭐).
-- `order_bridge.py`: AlgoDelta JSON (`strategy_order`) and `squareoff_position`.
+- `common_watch.py`: Order Management rows (Same strike, Pair, ⭐, Manual Entry).
+- `order_bridge.py`: AlgoDelta JSON: `strategy_order`, `limit_order`, `squareoff_position` and `cancel_order`.
+- `limit_orders.py`: Manual Entry Limit mode helpers (state in the order row's `mg` column, app SL/Target/trail checks, Upstox order-book matching).
 - `trade_tracker.py`: Order Details Entry/Exit/LTP/Points/P&L. Live orders use Upstox fills (FIFO per order); dry run is simulated.
 - `exit_rules.py`: one evaluator for SL/Target rules on 1-min candles (LTP / POINT / CANDLE, trailing SL, 15:15 exit).
 - `settings_store.py`: `settings.json` (Setup values) and `upstox_token.json` (today's token only).
@@ -89,18 +90,41 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Buttons:** **Add card** (set Target/SL/Trail on the card, then ⚡) or **Add & place** (uses the defaults).
    - The card is ready at once (TRIGGERED, no candle checks). **Price** reuses the PENDING entry logic; **Market** sends `strategy_order` now. AlgoDelta holds the SL, Target and trail.
    - Setup has a **Manual entry** default target (`tgt_manual`).
-   - **Limit mode (`limit_order`) is deferred** until the user has their own static IP. Since 1 April 2026, Upstox order APIs (place/modify/**cancel**) need a static IP registered in the user's own Upstox app. AlgoDelta's IP can't be used because it's their server's. With a static IP, an "Upstox direct" mode could offer real limit orders, modify, cancel and per-order square-off.
-   - The user is checking AlgoDelta's Syntax Generator for an entry-price field in `strategy_order`. If one exists, the Price mode could send it directly.
+   - **Limit mode** was added in PR #20 (decision 16) through AlgoDelta's `limit_order` and `cancel_order`, with the SL/Target watched by the app. Since 1 April 2026, Upstox order APIs (place/modify/cancel) need a static IP registered in the user's own Upstox app, and AlgoDelta's IP can't be used. With a static IP, an "Upstox direct" mode could add modify and per-order square-off, and keep the SL at the broker.
+   - The user checked AlgoDelta's Syntax Generator: `strategy_order` has **no entry-price field**, so the Price mode stays app-side.
 14. **Target fix (PR #15):** rows no longer copy the Setup target when they're added (the old `_stamp_target`). The default Target is read from Setup **when the order is placed**, so a Setup change applies to existing rows too.
 15. **Order Management sub-pages and cards (PRs #12 to #14):**
    - The nav group has Same strike, Pair, BEP Support ⭐ and Manual Entry.
    - Cards are modelled on AlgoDelta's order card, with a Compact view switch.
    - Entry at a price (PENDING): the app waits for the LTP, then sends a market `strategy_order` (details in Architecture).
 
+16. **Manual Entry Limit mode (PR #20):**
+   - **Form:** a third mode, **Price | Market | Limit**, with a "Limit price" field.
+   - **⚡ sends** AlgoDelta `limit_order` (BUY, quantity = lots, the price). Pause algo, dry run and the daily limit apply.
+   - **Typo guard:** a popup asks first if the price is ≥ `LIMIT_SANITY_PCT` (20%) away from the LTP.
+   - **SL/Target/trail are watched by the app**, not AlgoDelta (`limit_order` has no SL/Target fields):
+     - LTP/POINT rules and the trailing SL are checked on the live LTP every 2 s;
+     - a CANDLE rule goes to `c_sl`/`c_tgt` (candle path);
+     - a hit sends `squareoff_position` once (`mg.exit`);
+     - at 15:15: open limits are cancelled, filled ones are squared off.
+   - **Live fill:** read from the Upstox **order book** (`/v2/order/retrieve-all`, read-only, no static IP) every `LIMIT_POLL_SECONDS` = 5 s while open. Matching is by instrument, BUY LIMIT, price and time, then the `order_id`. The trade book is refreshed at once after a fill.
+   - **Card chips:** LIMIT OPEN @ x → FILLED @ x (· PARTIAL) → EXITED; also CANCELLING, CANCELLED, CANCEL FAILED (Retry cancel) and REJECTED (with the reason).
+   - **Cancel:** AlgoDelta `cancel_order` (`{"type":"cancel_order","script_type","script","product"}`) has **no order ID**, so it may cancel every pending order on that option (other limits and the broker SL/Target of open strategy orders). The popup warns about this.
+     - Live: CANCEL SENT, then the order book confirms it, else CANCEL FAILED after 30 s.
+     - Dry run: CANCELLED at once.
+     - A partial fill keeps its filled part protected.
+   - **Deleting a card** with an open limit sends `cancel_order` first (user request). A square-off of a partly filled limit cancels the rest first.
+   - **Dry run:** fills at the price once LTP ≤ price, or at once at the LTP if it's already below. The exit is a fresh LTP via the normal square-off.
+   - **Header badge:** "APP-MANAGED SL ACTIVE (n) - keep this PC on" / "LIMIT OPEN (n)".
+   - **Restart:** the state is in the orders file (`mg`), so watching resumes.
+   - **Order Details:** shows the limit state and app rules in SL/Target, plus a Cancel order action. The SL/Target can't be edited after placing (`order_rule_editable` is false).
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
+- Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
+- Cancel: `{"type": "cancel_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY"}` (no order ID).
 - Square-off: `{"type": "squareoff_position", "script_type": "CE", "script": "NIFTY23NOV2625300CE", "product": "INTRADAY"}`.
-- AlgoDelta has **no modify-SL/Target syntax** and no public read API (positions/fills), so live P&L comes from Upstox.
+- AlgoDelta has **no modify-SL/Target syntax** (and no modify-order syntax) and no public read API (positions/fills), so live P&L comes from Upstox.
 
 ## Daily checklist (user)
 1. Before 09:08: start the app. On Setup, enter today's Upstox token and upload the BEP CSV; the AlgoDelta settings are already saved.
@@ -115,9 +139,9 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - Entry and P&L filling in on cards;
   - a live square-off going SQUARING OFF → EXITED · Manual;
   - Manual Entry (Market and Price);
+  - **Limit mode with 1 lot:** the order book fields/status names and the order matching, a fill → app SL square-off, `cancel_order` → CANCELLED, and what `cancel_order` does to other pending orders on the same option (does it also cancel a strategy order's SL/Target?);
   - per-card trailing as sent.
 - **Waiting on the user:**
-  - does AlgoDelta's Syntax Generator have an entry-price field for `strategy_order`?
-  - their own static IP (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. The work branch is `claude/kind-keller-zydgn4`, which is reused and recreated from `main` for each PR. The user deletes it after a merge.
-- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); the Limit mode of Manual Entry.
+  - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PR #20: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).
