@@ -288,33 +288,44 @@ class Engine:
         cfg = config.AUTO_ORDER[name]
         return cfg.get("tgt_type", "POINT"), float(cfg.get(f"tgt_{kind}", cfg.get("tgt", 50)))
 
-    def _stamp_target(self, name, rows, kind):
-        tgt_type, tgt = self.default_target(name, kind)
-        for r in rows:
-            r.setdefault("tgt_type", tgt_type)
-            r.setdefault("tgt", tgt)
-        self.watches[name].save()
-
     def row_target(self, name, r):
+        """Default Target of a row = the CURRENT Setup value for its type (read when the order is placed, so a Setup
+        change also applies to rows added earlier). A row's own Target is its c_tgt rule (popup on the card)."""
         kind = {"star": "star", "pair": "pair"}.get(r.get("source"), "same")
-        d_type, d_tgt = self.default_target(name, kind)
-        return r.get("tgt_type") or d_type, float(r["tgt"]) if r.get("tgt") is not None else d_tgt
+        return self.default_target(name, kind)
 
-    def set_watch_target(self, name, row_id, tgt_type, tgt) -> bool:
-        ok = self.watches[name].set_target(row_id, tgt_type, tgt)
+    @staticmethod
+    def setup_trail(name) -> dict:
+        cfg = config.AUTO_ORDER[name]
+        return {"on": bool(cfg.get("trail")), "type": cfg.get("trail_type", "LTP"),
+                "trigger": float(cfg.get("trail_trigger", 20)), "point": float(cfg.get("trail_point", 1)),
+                "gap": float(cfg.get("trail_gap", 20))}
+
+    def row_trail(self, name, r) -> dict:
+        """Trailing SL of a card: its own (c_trail, set on the card) or the current Setup values."""
+        return r.get("c_trail") or self.setup_trail(name)
+
+    def set_watch_trail(self, name, row_id, trail) -> bool:
+        ok = self.watches[name].set_trail(row_id, trail)
         if ok:
-            self.log(f"{name} Order Management row {row_id}: target set to {tgt:g} ({tgt_type}).")
+            r = self.watches[name].get(row_id)
+            what = f"{r.get('strike') or ''}{r.get('opt') or ''}".strip() or f"row {row_id}"
+            if trail is None:
+                self.log(f"{name} {what}: trailing SL back to Setup.")
+            else:
+                self.log(f"{name} {what}: trailing SL " + (
+                    f"ON ({trail['type']}, trigger {trail['trigger']:g}, gap {trail['gap']:g}, point {trail['point']:g})"
+                    if trail["on"] else "OFF") + " for this card.")
+            self.bump("watch")
         return ok
 
     def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf):
         r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now())
-        self._stamp_target(name, [r], "pair")
         self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min.")
         self.bump("watch")
 
     def add_watch(self, name, strike, leg, price, tf):
         rows = self.watches[name].add(strike, leg, price, tf, _now())
-        self._stamp_target(name, rows, "same")
         self.log(f"{name} common price watch added: "
                  + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
         self.bump("watch")
@@ -494,7 +505,10 @@ class Engine:
         label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
                  "common": "Manual — common price"}[kind]
         tgt_type, tgt = self.row_target(name, r)
-        params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r)}, {}
+        tr = self.row_trail(name, r)
+        params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r),
+                             "trail": tr["on"], "trail_type": tr["type"], "trail_trigger": tr["trigger"],
+                             "trail_point": tr["point"], "trail_gap": tr["gap"]}, {}
         for k in ("sl", "tgt"):                       # the row's own SL / Target (popup in Order Management)
             rule = exit_rules.parse(r.get("c_" + k))
             if not rule:
@@ -572,7 +586,6 @@ class Engine:
                 continue
             row = cw.add_star(e)
             if row:
-                self._stamp_target(name, [row], "star")
                 added = True
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} added to Order Management "
                          f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")

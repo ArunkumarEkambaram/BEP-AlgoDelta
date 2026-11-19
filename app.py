@@ -612,6 +612,11 @@ def card_rule_box(name, r, kind, locked):
         d_type, d_val = engine.row_target(name, r)
     else:
         d_type, d_val = cfg["sl_type"], cfg["sl"]
+    order = engine.row_order(r) if locked else None
+    if order:                                         # show what was actually sent with the order
+        prm = trade_tracker._params(order)
+        if prm.get(kind) is not None:
+            d_type, d_val = prm[kind + "_type"], prm[kind]
 
     def on_set(new_rule):
         if engine.watches[name].set_custom(r["id"], kind, new_rule):
@@ -633,10 +638,98 @@ def card_rule_box(name, r, kind, locked):
         else:
             if locked:
                 ui.label(f"{d_val:g} {d_type}").classes("text-lg font-bold")
+                ui.label("as sent" if order else "Setup").classes("text-xs opacity-60")
             else:
                 ui.label(f"Set {what}").classes("text-blue-5 font-medium cursor-pointer") \
                     .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set))
-            ui.label(f"Default {d_val:g} {d_type}").classes("text-xs opacity-60")
+                ui.label(f"Default {d_val:g} {d_type} (Setup)").classes("text-xs opacity-60")
+
+
+def trail_dialog(name, r):
+    """Card's own trailing SL: ON/OFF, Type, Trigger, Point, Gap (starts from the card's current values)."""
+    cur = engine.row_trail(name, r)
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 380px"):
+        ui.label("Trailing SL for this card").classes("text-lg font-bold")
+        on = ui.switch("Trailing SL", value=cur["on"])
+        with ui.column().classes("w-full gap-1") as fields:
+            typ = ui.select(["LTP", "POINT"], value=cur["type"], label="Trail type").classes("w-full")
+            with ui.row().classes("w-full no-wrap gap-2"):
+                trig = ui.number("Trigger", value=cur["trigger"], min=0, step=1).classes("flex-1")
+                point = ui.number("Point", value=cur["point"], min=0, step=1).classes("flex-1")
+                gap = ui.number("Gap", value=cur["gap"], min=0, step=1).classes("flex-1")
+            ui.label("Once the high reaches entry + Trigger, SL = high \u2212 Gap (in steps of Point); it never moves "
+                     "down. Gap = Trigger moves the SL to cost at the trigger.").classes("text-xs opacity-70")
+        fields.bind_visibility_from(on, "value")
+        ui.label("Sent with this card's AlgoDelta order (no change after placing).").classes("text-xs opacity-70")
+
+        def save():
+            if on.value:
+                try:
+                    t, pt, g = float(trig.value), float(point.value), float(gap.value)
+                except (TypeError, ValueError):
+                    ui.notify("Enter Trigger, Point and Gap.", type="negative")
+                    return
+                if min(t, pt, g) <= 0:
+                    ui.notify("Trigger, Point and Gap must be above 0.", type="negative")
+                    return
+                if g > t:
+                    ui.notify("Gap must not be larger than Trigger.", type="negative")
+                    return
+                trail = {"on": True, "type": typ.value, "trigger": t, "point": pt, "gap": g}
+            else:
+                trail = {**cur, "on": False}
+            engine.set_watch_trail(name, r["id"], trail)
+            dlg.close()
+
+        def use_setup():
+            engine.set_watch_trail(name, r["id"], None)
+            dlg.close()
+        with ui.row().classes("w-full justify-between"):
+            ui.button("Use Setup", on_click=use_setup).props("flat" + ("" if r.get("c_trail") else " disable"))
+            with ui.row().classes("gap-2"):
+                ui.button("Close", on_click=dlg.close).props("color=red")
+                ui.button("Save", on_click=save)
+    dlg.props("persistent")
+    dlg.open()
+
+
+def card_trail_box(name, r, locked):
+    """Trailing box: the card's own trailing SL or Setup's. Click to change until ordered. Not with a CANDLE SL
+    (the app watches that SL, so AlgoDelta gets is_sl false and cannot trail)."""
+    sl_rule = exit_rules.parse(r.get("c_sl"))
+    order = engine.row_order(r) if locked else None
+    own = bool(r.get("c_trail"))
+    with card_box("Trailing", "edit" if not locked and own else None):
+        if order:                                     # what was actually sent
+            prm = trade_tracker._params(order)
+            if prm["trail"] and prm["is_sl"]:
+                ui.label(f"{prm['trigger']:g} / {prm['gap']:g}").classes("text-lg font-bold")
+                ui.label(f"as sent \u00b7 step {prm['step']:g}").classes("text-xs opacity-60")
+            else:
+                ui.label("OFF").classes("text-lg font-bold opacity-70")
+                ui.label("as sent").classes("text-xs opacity-60")
+            return
+        if sl_rule and sl_rule["type"] == "CANDLE":
+            ui.label("OFF").classes("text-lg font-bold opacity-70")
+            ui.label("not with a CANDLE SL").classes("text-xs text-amber-5")
+            return
+        tr = engine.row_trail(name, r)
+        src = "this card" if own else "Setup"
+        if tr["on"]:
+            v = ui.label(f"{tr['trigger']:g} / {tr['gap']:g}").classes("text-lg font-bold")
+            sub = f"{src} \u00b7 {tr['type']} \u00b7 step {tr['point']:g}"
+        else:
+            v = ui.label("OFF" if own or locked else "Set Trailing").classes(
+                "text-lg font-bold opacity-70" if own or locked else "text-blue-5 font-medium")
+            sub = f"{src}" + ("" if own else " (OFF)")
+        if not locked:
+            v.classes("cursor-pointer")
+            v.on("click", lambda: trail_dialog(name, r))
+        with ui.row().classes("items-center gap-1 no-wrap"):
+            ui.label(sub).classes("text-xs " + ("text-amber-5" if own else "opacity-60"))
+            if own and not locked:
+                ui.button(icon="close", on_click=lambda: engine.set_watch_trail(name, r["id"], None)) \
+                    .props("flat dense round size=xs color=red").tooltip("Back to Setup")
 
 
 def edit_dialog(name, r):
@@ -793,14 +886,7 @@ def order_card(name, r, place, live):
                     .classes("text-xs opacity-60")
             card_rule_box(name, r, "tgt", locked)
             card_rule_box(name, r, "sl", locked)
-            with card_box("Trailing"):
-                cfg = config.AUTO_ORDER[name]
-                if cfg.get("trail"):
-                    ui.label(f"{cfg['trail_trigger']:g} / {cfg['trail_gap']:g}").classes("text-lg font-bold")
-                    ui.label(f"Setup · {cfg['trail_type']} · step {cfg['trail_point']:g}").classes("text-xs opacity-60")
-                else:
-                    ui.label("OFF").classes("text-lg font-bold opacity-70")
-                    ui.label("Setup (common)").classes("text-xs opacity-60")
+            card_trail_box(name, r, locked)
 
         ui.separator()
         with ui.row().classes("w-full items-center gap-6 text-sm"):
