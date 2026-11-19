@@ -1,12 +1,12 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #17).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #18; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
 ## Working rules agreed with the user
 - **Always discuss requirements before writing code.** Ask questions with "Suggested:" answers and wait for the user's go-ahead.
-- Work on a branch, open a PR, and merge **only when the user says "merge PR #n"**.
+- Work on a branch, open a PR, and merge **only when the user says "merge PR #n"**. This applies to **every** change, docs-only ones included (no direct pushes to `main`; confirmed again after PR #17).
 - During market hours, **don't push**. Keep work on a local branch until the user says so.
 - After merging, the user runs `git pull origin main` and restarts the app.
 - `__pycache__/`, `settings.json`, `upstox_token.json`, `orders_*.csv` and `common_watch_*.json` are git-ignored. Never commit them.
@@ -68,6 +68,34 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     - The log is full height.
     - Setup is saved, except that Dry run always starts ON.
     - The Upstox token is saved for **today only** and reconnects automatically on start; there's a "Forget saved token" button.
+11. **Per-card Trailing SL (PR #15):**
+   - Click the card's Trailing box to open a popup: ON/OFF, Type, Trigger, Point and Gap. It starts from Setup and is stored as `c_trail` (`engine.row_trail`).
+   - It's sent in that card's JSON (and simulated in dry run) and locks once ordered. It's not available with a CANDLE SL (`is_sl` false).
+   - Ordered cards show the Target, SL and Trail **as sent** (from the order JSON).
+   - Start/End time was dropped (the user doesn't want it).
+12. **Manual square-off (PR #16):**
+   - **Where:** a **Square off** button on ordered cards (Order Management) and in the Action column of Order Details (every open order, including the 09:15 one). Order Details also has **Square off all** (one `squareoff_position` per option).
+   - **Confirm popup:** shows the quantity, entry, LTP and approximate P&L. AlgoDelta's `squareoff_position` has **no order ID or quantity**, so it closes the **whole position on that script**. The popup lists the other open orders on the same option, and all of them are marked.
+   - **Placing a second order on an option that's already open** asks for confirmation first (option A; there's no hard block).
+   - **Not blocked** by Pause algo or the daily limit.
+   - **Live:** `sq` = `SENT hh:mm:ss`, the card shows SQUARING OFF, and the trade book is refreshed at once. Exit/P&L then come from Upstox, and the card shows EXITED · Manual. On failure: `FAILED`, with a **Retry square off** button.
+   - **Dry run:** Exit = a fresh LTP at the click.
+   - **After a square-off:** pair opponent exits and app-watched CANDLE/custom rules are skipped (`engine.squared_off`).
+   - **Saved:** `sq` is stored in the orders file.
+   - **Verified by the user:** AlgoDelta's square-off closes the position, including its pending SL/Target.
+13. **Manual Entry (PR #17):**
+   - A 4th Order Management sub-page, `/order-management/manual-entry`, with rows of source `manual`.
+   - **Form:** Strike, CE/PE, Lots, **Price / Market** and Entry price (pre-filled with the live LTP from `engine.quote_option`).
+   - **Buttons:** **Add card** (set Target/SL/Trail on the card, then ⚡) or **Add & place** (uses the defaults).
+   - The card is ready at once (TRIGGERED, no candle checks). **Price** reuses the PENDING entry logic; **Market** sends `strategy_order` now. AlgoDelta holds the SL, Target and trail.
+   - Setup has a **Manual entry** default target (`tgt_manual`).
+   - **Limit mode (`limit_order`) is deferred** until the user has their own static IP. Since 1 April 2026, Upstox order APIs (place/modify/**cancel**) need a static IP registered in the user's own Upstox app. AlgoDelta's IP can't be used because it's their server's. With a static IP, an "Upstox direct" mode could offer real limit orders, modify, cancel and per-order square-off.
+   - The user is checking AlgoDelta's Syntax Generator for an entry-price field in `strategy_order`. If one exists, the Price mode could send it directly.
+14. **Target fix (PR #15):** rows no longer copy the Setup target when they're added (the old `_stamp_target`). The default Target is read from Setup **when the order is placed**, so a Setup change applies to existing rows too.
+15. **Order Management sub-pages and cards (PRs #12 to #14):**
+   - The nav group has Same strike, Pair, BEP Support ⭐ and Manual Entry.
+   - Cards are modelled on AlgoDelta's order card, with a Compact view switch.
+   - Entry at a price (PENDING): the app waits for the LTP, then sends a market `strategy_order` (details in Architecture).
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
@@ -81,31 +109,15 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 4. Add Order Management rows before 09:15 if you want first-candle triggers.
 
 ## Open / not yet verified
-- Not yet tested during market hours or against the real AlgoDelta webhook: `market-quote/ohlc`, the pre-open index value, `get-trades-for-day` fields, and 3-min candles. Test live with quantity 1 first.
-- Merged branches are still on GitHub: `claude/dry-run-exit`, `claude/first-candle-fifo`, `claude/order-mgmt-sections`, `claude/pair-watch`, `claude/per-order-sl-target`, `claude/per-type-targets`. Delete them with:
-  `git push origin --delete claude/dry-run-exit claude/first-candle-fifo claude/order-mgmt-sections claude/pair-watch claude/per-order-sl-target claude/per-type-targets`
-- **Per-card Trailing SL (PR #15):**
-  - Click the card's Trailing box to open a popup: ON/OFF, Type, Trigger, Point and Gap. It starts from Setup and is stored as `c_trail` (`engine.row_trail`).
-  - It's sent in that card's JSON (and simulated in dry run) and locks once ordered. It's not available with a CANDLE SL (`is_sl` false).
-  - Ordered cards show the Target, SL and Trail **as sent** (from the order JSON).
-  - Start/End time was dropped (the user doesn't want it).
-- **Manual square-off (PR #16):**
-  - **Where:** a **Square off** button on ordered cards (Order Management) and in the Action column of Order Details (every open order, including the 09:15 one). Order Details also has **Square off all** (one `squareoff_position` per option).
-  - **Confirm popup:** shows the quantity, entry, LTP and approximate P&L. AlgoDelta's `squareoff_position` has **no order ID or quantity**, so it closes the **whole position on that script**. The popup lists the other open orders on the same option, and all of them are marked.
-  - **Placing a second order on an option that's already open** asks for confirmation first (option A; there's no hard block).
-  - **Not blocked** by Pause algo or the daily limit.
-  - **Live:** `sq` = `SENT hh:mm:ss`, the card shows SQUARING OFF, and the trade book is refreshed at once. Exit/P&L then come from Upstox, and the card shows EXITED · Manual. On failure: `FAILED`, with a **Retry square off** button.
-  - **Dry run:** Exit = a fresh LTP at the click.
-  - **After a square-off:** pair opponent exits and app-watched CANDLE/custom rules are skipped (`engine.squared_off`).
-  - **Saved:** `sq` is stored in the orders file.
-  - **Verified by the user:** AlgoDelta's square-off closes the position, including its pending SL/Target.
-- **Manual Entry (PR #17):**
-  - A 4th Order Management sub-page, `/order-management/manual-entry`, with rows of source `manual`.
-  - **Form:** Strike, CE/PE, Lots, **Price / Market** and Entry price (pre-filled with the live LTP from `engine.quote_option`).
-  - **Buttons:** **Add card** (set Target/SL/Trail on the card, then ⚡) or **Add & place** (uses the defaults).
-  - The card is ready at once (TRIGGERED, no candle checks). **Price** reuses the PENDING entry logic; **Market** sends `strategy_order` now. AlgoDelta holds the SL, Target and trail.
-  - Setup has a **Manual entry** default target (`tgt_manual`).
-  - **Limit mode (`limit_order`) is deferred** until the user has their own static IP. Since 1 April 2026, Upstox order APIs (place/modify/**cancel**) need a static IP registered in the user's own Upstox app. AlgoDelta's IP can't be used because it's their server's. With a static IP, an "Upstox direct" mode could offer real limit orders, modify, cancel and per-order square-off.
-  - The user is checking AlgoDelta's Syntax Generator for an entry-price field in `strategy_order`. If one exists, the Price mode could send it directly.
-- **Target fix (PR #15):** rows no longer copy the Setup target when they're added (the old `_stamp_target`). The default Target is read from Setup **when the order is placed**, so a Setup change applies to existing rows too.
-- Ideas offered but not built: a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup).
+- **Not yet tested during market hours or against the real AlgoDelta webhook.** Test live with 1 lot first:
+  - `market-quote/ohlc`, the pre-open index value, the `get-trades-for-day` fields and 3-min candles;
+  - live option LTP on the cards (2 s), and a PENDING entry firing;
+  - Entry and P&L filling in on cards;
+  - a live square-off going SQUARING OFF → EXITED · Manual;
+  - Manual Entry (Market and Price);
+  - per-card trailing as sent.
+- **Waiting on the user:**
+  - does AlgoDelta's Syntax Generator have an entry-price field for `strategy_order`?
+  - their own static IP (for "Upstox direct" limit, modify, cancel and per-order square-off).
+- **Branches:** the merged feature branches are deleted. The work branch is `claude/kind-keller-zydgn4`, which is reused and recreated from `main` for each PR. The user deletes it after a merge.
+- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); the Limit mode of Manual Entry.
