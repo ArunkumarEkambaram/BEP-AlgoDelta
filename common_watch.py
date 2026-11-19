@@ -343,6 +343,15 @@ class CommonWatch:
 
     @staticmethod
     def status_text(r) -> str:
+        text = CommonWatch._status_text(r)
+        p = r.get("pending")
+        if r.get("order_status") == "PENDING" and p:
+            arrow = "\u2193" if p["dir"] == "below" else "\u2191"
+            text += f" \u00b7 Pending entry @ {p['price']:.2f} {arrow}"
+        return text
+
+    @staticmethod
+    def _status_text(r) -> str:
         if r.get("kind") == "pair":
             opp = "PE" if r.get("opt") == "CE" else "CE"
             if r["status"] == "watching":

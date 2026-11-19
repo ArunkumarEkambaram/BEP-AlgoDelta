@@ -539,12 +539,15 @@ def pair_section(rows, place, name):
 # ---------------------------------------------------------------------- Order Management cards
 OM_VIEW = {"compact": False}                      # Cards / Compact (table) view, shared by every tab
 CHIP = {"WAITING": "grey-7", "TRIGGERED": "green-7", "SENDING": "blue-7", "ORDERED": "blue-7",
-        "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8"}
+        "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8", "PENDING": "amber-9"}
 
 
 def card_state(r, order=None) -> str:
     """Card status chip: WAITING / TRIGGERED / SENDING / ORDERED · SENT|DRY RUN / EXITED / FAILED / ORDER FAILED."""
     os_ = r.get("order_status") or ""
+    if os_ == "PENDING" and r.get("pending"):
+        p = r["pending"]
+        return f"PENDING @ {p['price']:.2f} " + ("\u2193" if p["dir"] == "below" else "\u2191")
     if os_ == "sending":
         return "SENDING"
     if os_ in ("SENT", "DRY RUN"):
@@ -560,7 +563,7 @@ def card_state(r, order=None) -> str:
 
 
 def _chip_colour(state):
-    return CHIP.get(state.split(" ·")[0], "blue-7")
+    return CHIP.get(state.split(" ·")[0].split(" @")[0], "blue-7")
 
 
 def _num_text(v, fmt="{:.2f}"):
@@ -682,11 +685,44 @@ def confirm_delete(name, r):
     dlg.open()
 
 
+def entry_price_box(name, r, pending):
+    """Entry Price before ordering: empty = market at the click; a price = wait for the LTP (arrow = direction)."""
+    price, direction = r.get("entry_price"), r.get("entry_dir")
+    if pending:
+        p = r["pending"]
+        with ui.row().classes("items-center gap-1 no-wrap"):
+            ui.label(f"{p['price']:.2f}").classes("text-lg font-bold text-amber-5")
+            ui.icon("south" if p["dir"] == "below" else "north").classes("text-amber-5")
+        ui.label(f"waiting \u00b7 armed {p['armed_at']}").classes("text-xs text-amber-5")
+        return
+    if not direction and price:
+        ltp = engine.row_live_ltp(name, r)
+        direction = ("below" if price <= ltp else "above") if ltp is not None else None
+    with ui.row().classes("items-center gap-0 no-wrap"):
+        inp = ui.number(value=price, min=0, step=0.05, placeholder="Market") \
+            .props("dense borderless input-class=text-center").classes("w-20 text-lg font-bold")
+
+        def save(_e=None):
+            engine.set_watch_entry(name, r["id"], inp.value, r.get("entry_dir"))
+        inp.on("blur", save)
+        inp.on("keydown.enter", save)
+        if price:
+            def flip():
+                engine.set_watch_entry(name, r["id"], price, "above" if direction == "below" else "below")
+            ui.button(icon="south" if direction == "below" else "north" if direction == "above" else "swap_vert",
+                      on_click=flip).props("flat dense round size=sm color=amber") \
+                .tooltip("At or below (dip) / at or above (breakout). Click to flip." +
+                         ("" if r.get("entry_dir") else " Automatic from the LTP."))
+    sign = {"below": "\u2264 ", "above": "\u2265 "}.get(direction, "")
+    ui.label("market at \u26a1" if not price else f"wait LTP {sign}price, then market").classes("text-xs opacity-60")
+
+
 def order_card(name, r, place, live):
     """One Order Management row as a card. `live` collects callbacks that refresh LTP / Entry / P&L / status."""
     order = engine.row_order(r)
     state = card_state(r, order)
     done = (r.get("order_status") or "") in ORDER_DONE
+    pending = r.get("order_status") == "PENDING"
     locked = done
     border = {"FAILED": "#b91c1c", "TRIGGERED": "#15803d"}.get(state)
     with ui.card().classes("w-full gap-2").style(f"border: 1px solid {border}" if border else ""):
@@ -702,11 +738,17 @@ def order_card(name, r, place, live):
                     ui.badge(f"{r['opt']} fired · {CommonWatch.pair_title(r)}").props("color=grey-8")
             with ui.row().classes("items-center gap-2 no-wrap"):
                 chip = ui.badge(state).props(f"color={_chip_colour(state)}").classes("text-sm px-2 py-1")
-                can_place = r["status"] == "triggered" and not done
-                b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
-                    .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
-                b.tooltip("Place order")
-                b.set_enabled(can_place)
+                if pending:
+                    ui.button("Cancel pending", icon="block",
+                              on_click=lambda: engine.cancel_watch_entry(name, r["id"])) \
+                        .props("dense unelevated no-caps color=orange-9").tooltip("Stop waiting for the entry price")
+                else:
+                    can_place = r["status"] == "triggered" and not done
+                    b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
+                        .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
+                    b.tooltip(f"Arm: send when LTP reaches {r['entry_price']:.2f}" if r.get("entry_price")
+                              else "Place order now (market)")
+                    b.set_enabled(can_place)
                 ui.button(icon="close", on_click=lambda: confirm_delete(name, r)) \
                     .props("dense unelevated color=red").tooltip("Delete row")
                 can_edit = r["status"] == "watching" and r.get("source") != "star" and not r.get("order_status")
@@ -716,8 +758,13 @@ def order_card(name, r, place, live):
                 e.set_enabled(can_edit)
 
         with ui.row().classes("w-full no-wrap items-stretch overflow-x-auto"):
-            with card_box("Entry Price"):
-                entry_lbl = ui.label("--").classes("text-lg font-bold")
+            entry_lbl = None
+            editable = not done and not pending and r["status"] not in ("failed", "exited")
+            with card_box("Entry Price", "edit" if editable else None):
+                if done or r["status"] in ("failed", "exited"):
+                    entry_lbl = ui.label("--").classes("text-lg font-bold")
+                else:
+                    entry_price_box(name, r, pending)
             with card_box("Quantity"):
                 if locked:
                     ui.label(str(trade_tracker._f(order.get("qty")) and int(trade_tracker._f(order.get("qty")))
@@ -771,7 +818,8 @@ def order_card(name, r, place, live):
     def refresh():
         o = engine.row_order(r)
         ltp_lbl.set_text(card_ltp_text(name, r))
-        entry_lbl.set_text(_num_text(o.get("entry")) if o else "--")
+        if entry_lbl is not None:
+            entry_lbl.set_text(_num_text(o.get("entry")) if o else "--")
         pnl = trade_tracker._f(o.get("pnl")) if o else None
         pnl_lbl.set_text(f"{pnl:,.2f}" if pnl is not None else ("0" if o else "--"))
         pnl_lbl.classes(remove="text-green-5 text-red-5")
@@ -815,6 +863,11 @@ def om_list(name, title, icon, draw):
     live = []
 
     async def place(row_id):
+        r = engine.watches[name].get(row_id)
+        if r and r.get("entry_price"):
+            ok, msg = engine.arm_watch_entry(name, row_id)
+            ui.notify(msg, type="positive" if ok else "warning")
+            return
         await engine.place_watch_order(name, row_id)
 
     def render():
@@ -1302,6 +1355,6 @@ def logs_page():
 app.on_startup(engine.auto_connect)
 engine.scan_timer = app.timer(config.SCAN_INTERVAL_SECONDS, engine.scan)
 app.timer(config.OPENING_TICK_SECONDS, engine.opening)
-app.timer(config.OPTION_LTP_SECONDS, engine.refresh_option_ltps)
+app.timer(config.OPTION_LTP_SECONDS, engine.option_tick)
 
 ui.run(title="BEP AlgoDelta", port=8083, reload=False, dark=True)
