@@ -16,9 +16,9 @@ import json
 from datetime import datetime, time as dtime, timedelta
 
 import config
+import exit_rules
 import market_utils
 
-DRY_EXIT_TIME = dtime(15, 15)            # open dry-run trades are closed at the 15:15 candle's open
 
 TRACKED = ("SENT", "DRY RUN")
 
@@ -96,8 +96,9 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
             exit_ = _f(r.get("exit"))
             if exit_ is None and entry is not None and ik:
                 candles, _cerr = client.fetch_intraday_candles(ik, 1)
-                res = simulate_exit(entry, r.get("time", ""), candles or [], _params(r), now or
-                                    datetime.now(market_utils.IST))
+                res = exit_rules.evaluate(entry, r.get("time", ""), candles or [],
+                                          base_rules(_params(r)) + custom_rules(r),
+                                          now or datetime.now(market_utils.IST), eod=True)
                 if res:
                     exit_, exit_time, reason = res
                     fields.update(exit_time=exit_time, exit_reason=reason, exit_new=True)
@@ -111,6 +112,13 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
             sold_avg, sold = _avg(f["SELL"])
             exit_ = sold_avg if bought and sold >= bought else None
             qty_units = bought or None
+            rules = custom_rules(r)
+            if rules and exit_ is None and entry is not None and not r.get("c_done") and ik:
+                candles, _cerr = client.fetch_intraday_candles(ik, 1)
+                hit = exit_rules.evaluate(entry, r.get("time", ""), candles or [], rules,
+                                          now or datetime.now(market_utils.IST), eod=False)
+                if hit:
+                    fields["custom_hit"] = hit
             fields["filled_qty"] = int(bought) if bought else ""
         fields.update(_points(entry, exit_, ltp, qty_units))
         out[r["id"]] = fields
@@ -130,57 +138,34 @@ def _params(row) -> dict:
         "trail": bool(p.get("is_trail_set", cfg.get("trail", False))),
         "trigger": _f(p.get("trail_trigger", cfg.get("trail_trigger"))),
         "gap": _f(p.get("trail_gap", cfg.get("trail_gap"))), "step": _f(p.get("trail_point", cfg.get("trail_point"))) or 1,
+        "is_sl": bool(p.get("is_sl", True)), "is_tgt": bool(p.get("is_tgt", True)),
     }
 
 
-def simulate_exit(entry: float, entry_time: str, candles: list, prm: dict, now):
-    """
-    Dry-run exit from 1-minute candles that start AFTER the entry minute (the forming one included).
-      Target: POINT = entry + value, LTP = that price.  SL: POINT = entry - value, LTP = that price.
-      Trailing SL (if on): once the highest price reaches entry + trigger, SL = highest - gap (moved in steps
-      of `step` points) and never moves down. E.g. entry 178, SL 166, trigger 20, gap 20: at 198 SL = 178 (cost),
-      at 210 SL = 190.
-      Per candle: SL is checked first (if SL and target are hit in the same minute, it counts as SL), then
-      target; the trail is raised from that candle's high for the NEXT candle.
-      End of day: still open at 15:15 -> exit at the 15:15 candle's open.
-    Returns (exit_price, "HH:MM", reason) or None while the trade is still open.
-    """
-    try:
-        hh, mm, *_ = (int(x) for x in entry_time.split(":"))
-    except ValueError:
-        return None
-    day = now.astimezone(market_utils.IST) if now.tzinfo else now
-    entry_min = market_utils.IST.localize(datetime(day.year, day.month, day.day, hh, mm)) if day.tzinfo is None \
-        else day.replace(hour=hh, minute=mm, second=0, microsecond=0)
-    target = entry + prm["tgt"] if prm["tgt_type"] == "POINT" else prm["tgt"]
-    sl = entry - prm["sl"] if prm["sl_type"] == "POINT" else prm["sl"]
-    if target is None or sl is None:
-        return None
-    trailed, high = False, entry
-    for c in sorted(candles, key=lambda c: c[0]):
-        start = datetime.fromisoformat(c[0])
-        start = start.astimezone(market_utils.IST) if start.tzinfo else market_utils.IST.localize(start)
-        if start.date() != entry_min.date() or start <= entry_min:
-            continue
-        o, h, l = float(c[1]), float(c[2]), float(c[3])
-        label = start.strftime("%H:%M")
-        if start.time() >= DRY_EXIT_TIME:
-            return round(o, 2), label, "End of day 15:15"
-        if l <= sl:
-            return round(sl, 2), label, ("Trailing SL" if trailed else "SL")
-        if h >= target:
-            return round(target, 2), label, "Target"
-        high = max(high, h)
-        if prm["trail"] and prm["trigger"] is not None and prm["gap"] is not None and high >= entry + prm["trigger"]:
-            steps = int((high - prm["gap"] - entry) // prm["step"])
-            new_sl = entry + steps * prm["step"]
-            if new_sl > sl:
-                sl, trailed = new_sl, True
-    if now.astimezone(market_utils.IST).time() >= DRY_EXIT_TIME and now.date() == entry_min.date() and candles:
-        last = sorted(candles, key=lambda c: c[0])[-1]
-        return round(float(last[4]), 2), now.strftime("%H:%M"), "End of day 15:15"
-    return None
+def base_rules(prm: dict) -> list:
+    """The common SL / Target the order was sent with (AlgoDelta holds these for live orders)."""
+    rules = []
+    if prm.get("is_sl", True) and prm.get("sl") is not None:
+        r = exit_rules.make_rule("sl", prm["sl_type"] if prm["sl_type"] in ("LTP", "POINT") else "POINT",
+                                 prm["sl"], custom=False)
+        if prm.get("trail") and prm.get("trigger") is not None and prm.get("gap") is not None:
+            r["trail"] = {"trigger": prm["trigger"], "gap": prm["gap"], "step": prm.get("step") or 1}
+        rules.append(r)
+    if prm.get("is_tgt", True) and prm.get("tgt") is not None:
+        rules.append(exit_rules.make_rule("tgt", prm["tgt_type"] if prm["tgt_type"] in ("LTP", "POINT") else "POINT",
+                                          prm["tgt"], custom=False))
+    return rules
 
+
+def custom_rules(row) -> list:
+    """Per-order SL / Target set in the app (Order Management before placing, Order Details after)."""
+    return [r for r in (exit_rules.parse(row.get("c_sl")), exit_rules.parse(row.get("c_tgt"))) if r]
+
+
+def simulate_exit(entry: float, entry_time: str, candles: list, prm: dict, now):
+    """Dry-run exit with the order's common SL / Target / trailing SL (see exit_rules.evaluate).
+    Returns (exit_price, "HH:MM", reason) or None while the trade is still open."""
+    return exit_rules.evaluate(entry, entry_time, candles, base_rules(prm), now, eod=True)
 
 def _keep(row, key):
     return row.get(key, "")
