@@ -89,5 +89,15 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - It's sent in that card's JSON (and simulated in dry run) and locks once ordered. It's not available with a CANDLE SL (`is_sl` false).
   - Ordered cards show the Target, SL and Trail **as sent** (from the order JSON).
   - Start/End time was dropped (the user doesn't want it).
+- **Manual square-off (PR #16):**
+  - **Where:** a **Square off** button on ordered cards (Order Management) and in the Action column of Order Details (every open order, including the 09:15 one). Order Details also has **Square off all** (one `squareoff_position` per option).
+  - **Confirm popup:** shows the quantity, entry, LTP and approximate P&L. AlgoDelta's `squareoff_position` has **no order ID or quantity**, so it closes the **whole position on that script**. The popup lists the other open orders on the same option, and all of them are marked.
+  - **Placing a second order on an option that's already open** asks for confirmation first (option A; there's no hard block).
+  - **Not blocked** by Pause algo or the daily limit.
+  - **Live:** `sq` = `SENT hh:mm:ss`, the card shows SQUARING OFF, and the trade book is refreshed at once. Exit/P&L then come from Upstox, and the card shows EXITED · Manual. On failure: `FAILED`, with a **Retry square off** button.
+  - **Dry run:** Exit = a fresh LTP at the click.
+  - **After a square-off:** pair opponent exits and app-watched CANDLE/custom rules are skipped (`engine.squared_off`).
+  - **Saved:** `sq` is stored in the orders file.
+  - **Verified by the user:** AlgoDelta's square-off closes the position, including its pending SL/Target.
 - **Target fix (PR #15):** rows no longer copy the Setup target when they're added (the old `_stamp_target`). The default Target is read from Setup **when the order is placed**, so a Setup change applies to existing rows too.
 - Ideas offered but not built: a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup).

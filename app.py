@@ -43,8 +43,10 @@ ORDER_COLUMNS = [
     {"name": "status", "label": "Status", "field": "status", "align": "left"},
     {"name": "rules", "label": "SL / Target", "field": "rules_text", "align": "left"},
     {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
+    {"name": "action", "label": "Action", "field": "sq_text", "align": "left"},
 ]
-ORDER_EXPORT_COLUMNS = [(c["field"], c["label"]) for c in ORDER_COLUMNS] + [("payload", "JSON")]
+ORDER_EXPORT_COLUMNS = [(c["field"], c["label"]) for c in ORDER_COLUMNS if c["name"] != "action"] + \
+    [("sq", "Square-off"), ("payload", "JSON")]
 BEP_EXPORT_COLUMNS = [
     ("index", "Index"), ("opt", "Type"), ("strike", "Strike"), ("first", "First of day"),
     ("bep", "BEP"), ("time", "Support time"), ("setup", "Setup"), ("fail_level", "Fail level"),
@@ -539,7 +541,8 @@ def pair_section(rows, place, name):
 # ---------------------------------------------------------------------- Order Management cards
 OM_VIEW = {"compact": False}                      # Cards / Compact (table) view, shared by every tab
 CHIP = {"WAITING": "grey-7", "TRIGGERED": "green-7", "SENDING": "blue-7", "ORDERED": "blue-7",
-        "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8", "PENDING": "amber-9"}
+        "EXITED": "purple-6", "FAILED": "red-7", "ORDER FAILED": "red-7", "BLOCKED": "orange-8", "PENDING": "amber-9",
+        "SQUARING OFF": "deep-orange-8", "SQUARE-OFF FAILED": "red-7"}
 
 
 def card_state(r, order=None) -> str:
@@ -552,7 +555,14 @@ def card_state(r, order=None) -> str:
         return "SENDING"
     if os_ in ("SENT", "DRY RUN"):
         exited = r["status"] == "exited" or (order is not None and trade_tracker._f(order.get("exit")) is not None)
-        return "EXITED" if exited else f"ORDERED · {os_}"
+        sq = str((order or {}).get("sq") or "")
+        if exited:
+            return "EXITED · Manual" if engine.squared_off(order or {}) else "EXITED"
+        if sq.startswith("SENT"):
+            return "SQUARING OFF"
+        if sq.startswith("FAILED"):
+            return "SQUARE-OFF FAILED"
+        return f"ORDERED · {os_}"
     if r["status"] == "failed":
         return "FAILED"
     if r["status"] == "exited":
@@ -778,6 +788,96 @@ def confirm_delete(name, r):
     dlg.open()
 
 
+def square_off_dialog(order_id):
+    """Confirm a manual square-off; lists every open order on the same option (closed together)."""
+    o = next((x for x in engine.order_log if x["id"] == order_id), None)
+    if not o:
+        return
+    retry = str(o.get("sq") or "").startswith("FAILED")
+    group = engine.open_on_option(o["index"], o["strike"], o["opt"], exclude_id=o["id"])
+    lots = trade_tracker._f(o.get("qty")) or 1
+    units = lots * config.INDEXES.get(o["index"], {}).get("lot_size", 1)
+    entry, ltp = trade_tracker._f(o.get("entry")), trade_tracker._f(o.get("ltp_live"))
+    pnl = (ltp - entry) * units if entry is not None and ltp is not None else None
+    sym = order_bridge.symbol(o["index"], o.get("expiry") or engine.monitors[o["index"]].expiry, o["strike"], o["opt"])
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 440px"):
+        ui.label(("Retry square off " if retry else "Square off ") + sym).classes("text-lg font-bold")
+        with ui.grid(columns=2).classes("w-full gap-x-6 gap-y-1 text-sm"):
+            for k, v in (("Order", engine.order_label(o)), ("Mode", o.get("status")), ("Quantity", f"{lots:g} lot(s)"),
+                         ("Entry", f"{entry:.2f}" if entry is not None else "--"),
+                         ("LTP", f"{ltp:.2f}" if ltp is not None else "--"),
+                         ("Approx. P&L", f"\u20b9{pnl:,.2f}" if pnl is not None else "--")):
+                ui.label(k).classes("opacity-60")
+                ui.label(str(v)).classes("font-medium")
+        if group:
+            with ui.card().classes("w-full bg-orange-10 text-orange-2"):
+                ui.label("AlgoDelta closes the WHOLE position on this option. These open orders are closed too:") \
+                    .classes("text-sm font-medium")
+                for g in group:
+                    ui.label("\u2022 " + engine.order_label(g)).classes("text-sm")
+        ui.label("Sends AlgoDelta squareoff_position (market). Not blocked by Pause algo or the daily limit. "
+                 + ("Dry run: the exit is recorded at the current LTP." if o.get("status") == "DRY RUN" else
+                    "Exit / P&L come from the Upstox trade book.")).classes("text-xs opacity-70")
+
+        async def go():
+            dlg.close()
+            await engine.square_off(o["id"])
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Retry square off" if retry else "Square off", icon="logout", on_click=go).props("color=red")
+    dlg.open()
+
+
+def square_off_all_dialog():
+    opens = [o for o in engine.order_log if engine.is_open(o)]
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 440px"):
+        ui.label("Square off ALL open orders").classes("text-lg font-bold")
+        if not opens:
+            ui.label("No open orders.").classes("text-sm opacity-70")
+            ui.button("Close", on_click=dlg.close).props("flat")
+            dlg.open()
+            return
+        for o in opens:
+            ui.label(f"\u2022 {o['index']} {o['strike']}{o['opt']} \u2014 {engine.order_label(o)} ({o['status']})") \
+                .classes("text-sm")
+        ui.label("One squareoff_position per option. Not blocked by Pause algo or the daily limit.") \
+            .classes("text-xs opacity-70")
+
+        async def go():
+            dlg.close()
+            res = await engine.square_off_all()
+            ui.notify(f"Square off all: {len(res)} option(s) sent.", type="warning")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Square off all", icon="logout", on_click=go).props("color=red")
+    dlg.open()
+
+
+def confirm_same_option(name, r, then):
+    """Warn before ordering an option that already has an open order (one square-off closes both)."""
+    if r.get("kind") == "pair" and not r.get("opt"):
+        return then()
+    opens = engine.open_on_option(name, r.get("strike"), r.get("opt"))
+    if not opens:
+        return then()
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 420px"):
+        ui.label(f"{r['strike']}{r['opt']} is already open").classes("text-lg font-bold")
+        for o in opens:
+            ui.label("\u2022 " + engine.order_label(o)).classes("text-sm")
+        ui.label("AlgoDelta's square-off closes the whole position on an option, so squaring off one of these "
+                 "orders later will close both.").classes("text-sm text-orange-4")
+
+        async def go():
+            dlg.close()
+            res = then()
+            if hasattr(res, "__await__"):
+                await res
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button("Continue", on_click=go).props("color=orange-9")
+    dlg.open()
+
+
 def entry_price_box(name, r, pending):
     """Entry Price before ordering: empty = market at the click; a price = wait for the LTP (arrow = direction)."""
     price, direction = r.get("entry_price"), r.get("entry_dir")
@@ -831,6 +931,12 @@ def order_card(name, r, place, live):
                     ui.badge(f"{r['opt']} fired · {CommonWatch.pair_title(r)}").props("color=grey-8")
             with ui.row().classes("items-center gap-2 no-wrap"):
                 chip = ui.badge(state).props(f"color={_chip_colour(state)}").classes("text-sm px-2 py-1")
+                if order is not None and (engine.is_open(order) or str(order.get("sq") or "").startswith("FAILED")) \
+                        and r["status"] != "exited":
+                    retry = str(order.get("sq") or "").startswith("FAILED")
+                    ui.button("Retry square off" if retry else "Square off", icon="logout",
+                              on_click=lambda: square_off_dialog(order["id"])) \
+                        .props("dense unelevated no-caps color=red-8").tooltip("Exit this position now (market)")
                 if pending:
                     ui.button("Cancel pending", icon="block",
                               on_click=lambda: engine.cancel_watch_entry(name, r["id"])) \
@@ -950,11 +1056,18 @@ def om_list(name, title, icon, draw):
 
     async def place(row_id):
         r = engine.watches[name].get(row_id)
-        if r and r.get("entry_price"):
-            ok, msg = engine.arm_watch_entry(name, row_id)
-            ui.notify(msg, type="positive" if ok else "warning")
+        if not r:
             return
-        await engine.place_watch_order(name, row_id)
+
+        async def do():
+            if r.get("entry_price"):
+                ok, msg = engine.arm_watch_entry(name, row_id)
+                ui.notify(msg, type="positive" if ok else "warning")
+                return
+            await engine.place_watch_order(name, row_id)
+        res = confirm_same_option(name, r, do)
+        if hasattr(res, "__await__"):
+            await res
 
     def render():
         holder.clear()
@@ -1089,6 +1202,7 @@ def orders_page():
     with ui.row().classes("w-full items-center justify-between"):
         ui.label("Order Details").classes("text-2xl font-bold")
         with ui.row().classes("gap-2"):
+            ui.button("Square off all", icon="logout", on_click=square_off_all_dialog).props("dense color=red-8")
             ui.button("CSV", icon="download", on_click=lambda: ui.download(
                 export_utils.build_csv(list(engine.order_log), ORDER_EXPORT_COLUMNS),
                 f"algodelta_orders_{datetime.now().strftime('%Y-%m-%d')}.csv")).props("dense outline")
@@ -1144,12 +1258,24 @@ def orders_page():
         dlg.open()
     table.on("rules", open_rules)
 
+    table.add_slot("body-cell-action", '''
+        <q-td key="action" :props="props" style="white-space: nowrap">
+            <q-btn v-if="props.row.sq_action" dense unelevated no-caps size="sm" color="red-8" icon="logout"
+                   :label="props.row.sq_action" @click="() => $parent.$emit('squareoff', props.row.id)" />
+            <span v-else class="text-caption">{{ props.row.sq_text }}</span>
+        </q-td>''')
+    table.on("squareoff", lambda e: square_off_dialog(e.args))
+
     def render():
         for r in engine.order_log:
             parts = [f"{'SL' if k == 'sl' else 'Tgt'} {exit_rules.describe(exit_rules.parse(r.get('c_' + k)))}"
                      for k in ("sl", "tgt") if exit_rules.parse(r.get("c_" + k))]
             r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
             r["rules_edit"] = engine.order_rule_editable(r)
+            sq = str(r.get("sq") or "")
+            r["sq_action"] = "Retry square off" if sq.startswith("FAILED") and trade_tracker._f(r.get("exit")) is None \
+                else ("Square off" if engine.is_open(r) else "")
+            r["sq_text"] = f"Squared off {sq}" if sq else ""
         table.rows = list(reversed(engine.order_log))
         table.update()
         s = engine.pnl_summary()
