@@ -167,6 +167,15 @@ class CommonWatch:
         self.save()
         return True
 
+    def set_custom(self, row_id: int, kind: str, rule) -> bool:
+        """Row's own SL ("sl") or Target ("tgt") rule, or None to use the default. Locked once ordered."""
+        r = self.get(row_id)
+        if not r or r.get("order_status") in ("SENT", "DRY RUN", "sending"):
+            return False
+        r["c_" + kind] = rule
+        self.save()
+        return True
+
     def set_order_status(self, row_id: int, status: str):
         r = self.get(row_id)
         if r:

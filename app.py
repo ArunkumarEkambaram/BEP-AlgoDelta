@@ -13,6 +13,7 @@ from datetime import datetime
 from nicegui import app, ui
 
 import config
+import exit_rules
 import export_utils
 import order_bridge
 from common_watch import CommonWatch
@@ -38,9 +39,10 @@ ORDER_COLUMNS = [
     {"name": "points", "label": "Captured Points", "field": "points", "align": "left"},
     {"name": "pnl", "label": "P&L ₹", "field": "pnl", "align": "left"},
     {"name": "status", "label": "Status", "field": "status", "align": "left"},
+    {"name": "rules", "label": "SL / Target", "field": "rules_text", "align": "left"},
     {"name": "detail", "label": "Detail", "field": "detail", "align": "left"},
 ]
-ORDER_EXPORT_COLUMNS = [(c["name"], c["label"]) for c in ORDER_COLUMNS] + [("payload", "JSON")]
+ORDER_EXPORT_COLUMNS = [(c["field"], c["label"]) for c in ORDER_COLUMNS] + [("payload", "JSON")]
 BEP_EXPORT_COLUMNS = [
     ("index", "Index"), ("opt", "Type"), ("strike", "Strike"), ("first", "First of day"),
     ("bep", "BEP"), ("time", "Support time"), ("setup", "Setup"), ("fail_level", "Fail level"),
@@ -333,27 +335,88 @@ def support_page():
 
 
 # ====================================================================== Order Management (common price + stars)
-def target_cell(name, r):
-    """Row's own target (type + value); saved on Enter / leaving the box; locked once ordered."""
-    locked = r.get("order_status") in ("SENT", "DRY RUN", "sending")
-    t_type, t_val = engine.row_target(name, r)
-    with ui.row().classes("gap-1 no-wrap items-center"):
-        sel = ui.select(["POINT", "LTP"], value=t_type).props("dense options-dense").classes("w-24")
-        num = ui.number(value=t_val, min=0, step=1).props("dense").classes("w-20")
+def rule_dialog(title, kind, current, on_save, on_cancel=None):
+    """Popup to set an SL / Target rule: Type LTP / POINT / CANDLE, Time frame (CANDLE), Value.
+    Created on the page layout (not inside the row) so a row redraw during a scan cannot close it."""
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 380px"):
+        ui.label(title).classes("text-lg font-bold")
+        typ = ui.select(list(exit_rules.TYPES), value=(current or {}).get("type", "CANDLE"),
+                        label="Type").classes("w-full")
+        tf = ui.select({1: "1 Min", 3: "3 Min", 5: "5 Min"}, value=(current or {}).get("tf") or 5,
+                       label="Time frame").classes("w-full")
+        tf.bind_visibility_from(typ, "value", lambda v: v == "CANDLE")
+        val = ui.number("Value", value=(current or {}).get("value"), min=0, step=0.05).classes("w-full")
+        hint = ui.label("").classes("text-xs opacity-70")
 
-        def commit(_=None, sel=sel, num=num, rid=r["id"]):
-            if num.value is None or float(num.value) <= 0:
-                ui.notify("Target must be above 0.", type="negative")
+        def explain(_=None):
+            side = "below" if kind == "sl" else "above"
+            sign = "entry \u2212 value" if kind == "sl" else "entry + value"
+            hint.set_text({"CANDLE": f"Exit when a {tf.value}-min candle CLOSES {side} the value (a wick does not exit).",
+                           "LTP": "The value is a price; exit when the price touches it.",
+                           "POINT": f"The value is points from entry ({sign})."
+                           }[typ.value])
+        typ.on_value_change(explain)
+        tf.on_value_change(explain)
+        explain()
+
+        def save():
+            if val.value is None or float(val.value) <= 0:
+                ui.notify("Value must be above 0.", type="negative")
                 return
-            if engine.set_watch_target(name, rid, sel.value, float(num.value)):
-                ui.notify(f"Target {float(num.value):g} ({sel.value}) saved for this row.", type="positive")
-        sel.on_value_change(commit)
-        num.on("blur", commit)
-        num.on("keydown.enter", commit)
+            on_save(exit_rules.make_rule(kind, typ.value, float(val.value), tf.value))
+            dlg.close()
+
+        def cancel():
+            dlg.close()
+            if on_cancel:
+                try:
+                    on_cancel()
+                except Exception:                      # the row was redrawn meanwhile; nothing to reset
+                    pass
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Close", on_click=cancel).props("color=red")
+            ui.button("Add" if not current else "Save", on_click=save)
+    dlg.props("persistent")
+    dlg.open()
+
+
+def rule_toggle(label, kind, current, default_text, locked, on_set):
+    """Switch + summary. ON opens the popup; OFF goes back to the default. Click the summary to edit."""
+    rule = exit_rules.parse(current)
+    with ui.row().classes("items-center gap-1 no-wrap"):
+        sw = ui.switch(label, value=bool(rule)).props("dense")
+        summary = ui.label(exit_rules.describe(rule) if rule else default_text).classes(
+            "text-xs " + ("text-blue-4 cursor-pointer underline" if rule and not locked else "opacity-60"))
+
+        def changed(ev):
+            if ev.value and not exit_rules.parse(current):
+                rule_dialog(f"Add {'StopLoss' if kind == 'sl' else 'Target'}", kind, None, on_set,
+                            on_cancel=lambda: sw.set_value(False))
+            elif not ev.value and exit_rules.parse(current):
+                on_set(None)
+        sw.on_value_change(changed)
+        if rule and not locked:
+            summary.on("click", lambda: rule_dialog(f"Edit {'StopLoss' if kind == 'sl' else 'Target'}", kind, rule, on_set))
         if locked:
-            sel.disable()
-            num.disable()
-            sel.tooltip("Locked: this is the target that was sent with the order")
+            sw.disable()
+
+
+def sl_tgt_cell(name, r):
+    """Order Management row: its own SL / Target (popup); OFF = Setup SL / the row's default target."""
+    locked = r.get("order_status") in ("SENT", "DRY RUN", "sending")
+    cfg = config.AUTO_ORDER[name]
+    t_type, t_val = engine.row_target(name, r)
+
+    def setter(kind):
+        def on_set(rule):
+            if engine.watches[name].set_custom(r["id"], kind, rule):
+                engine.log(f"{name} Order Management row {r['id']}: {'SL' if kind == 'sl' else 'Target'} "
+                           + (f"set to {exit_rules.describe(rule)}" if rule else "back to default"))
+                engine.bump("watch")
+        return on_set
+    with ui.column().classes("gap-0"):
+        rule_toggle("SL", "sl", r.get("c_sl"), f"Setup {cfg['sl']:g} {cfg['sl_type']}", locked, setter("sl"))
+        rule_toggle("Target", "tgt", r.get("c_tgt"), f"Default {t_val:g} {t_type}", locked, setter("tgt"))
 
 
 def section(title, icon, rows, empty_text, place, name):
@@ -362,8 +425,8 @@ def section(title, icon, rows, empty_text, place, name):
     if not rows:
         ui.label(empty_text).classes("text-sm opacity-70")
         return
-    with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 190px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "Target", ""):
+    with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 230px 200px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "SL / Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
@@ -373,7 +436,7 @@ def section(title, icon, rows, empty_text, place, name):
                      CommonWatch.status_text(r)]
             for txt in cells:
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
-            target_cell(name, r)
+            sl_tgt_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
                 b = ui.button(f"Ordered ({r['order_status']})" if done else "Place order",
@@ -389,8 +452,8 @@ def pair_section(rows, place, name):
     if not rows:
         ui.label("No pairs yet - choose 'Pair (CE vs PE)' above.").classes("text-sm opacity-70")
         return
-    with ui.grid(columns="240px 60px 60px 170px 1fr 190px 220px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "Target", ""):
+    with ui.grid(columns="240px 60px 60px 170px 1fr 230px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "SL / Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2",
@@ -399,7 +462,7 @@ def pair_section(rows, place, name):
             closes = " \u00b7 ".join(f"{v:.2f}" if v is not None else "--" for v in lc)
             for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}", f"{r['tf']} min", closes, CommonWatch.status_text(r)):
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
-            target_cell(name, r)
+            sl_tgt_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
                 text = f"Ordered {r['opt']} ({r['order_status']})" if done else \
@@ -529,7 +592,44 @@ def orders_page():
              "1-minute candles with the order's Target / SL / trailing SL (SL first if both hit in one minute; "
              "closed at 15:15 if still open). Captured Points = Exit \u2212 Entry.").classes("text-xs opacity-70")
 
+    table.add_slot("body-cell-rules", '''
+        <q-td key="rules" :props="props" style="white-space: normal; max-width: 220px">
+            <q-btn v-if="props.row.rules_edit" dense flat no-caps size="sm" color="primary" icon="tune"
+                   :label="props.row.rules_text || 'Set SL / Target'" @click="() => $parent.$emit('rules', props.row.id)" />
+            <span v-else class="text-caption">{{ props.row.rules_text }}</span>
+        </q-td>''')
+
+    def open_rules(e):
+        rid = e.args
+        r = next((o for o in engine.order_log if o["id"] == rid), None)
+        if not r or not engine.order_rule_editable(r):
+            ui.notify("This order can no longer be changed.", type="warning")
+            return
+        cfg = config.AUTO_ORDER.get(r["index"], {})
+        with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
+            ui.label(f"{r['index']} {r['strike']}{r['opt']} \u2014 SL / Target").classes("text-lg font-bold")
+            ui.label("Watched by the app; when hit, the position is squared off (live) or the exit is recorded "
+                     "(dry run). AlgoDelta's original SL / Target stay active too - whichever hits first exits."
+                     ).classes("text-xs opacity-70")
+
+            def setter(kind):
+                def on_set(rule):
+                    engine.set_order_custom(rid, kind, rule)
+                    dlg.close()
+                return on_set
+            rule_toggle("SL", "sl", r.get("c_sl"), f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}", False,
+                        setter("sl"))
+            rule_toggle("Target", "tgt", r.get("c_tgt"), "Common (as sent)", False, setter("tgt"))
+            ui.button("Close", on_click=dlg.close).props("flat")
+        dlg.open()
+    table.on("rules", open_rules)
+
     def render():
+        for r in engine.order_log:
+            parts = [f"{'SL' if k == 'sl' else 'Tgt'} {exit_rules.describe(exit_rules.parse(r.get('c_' + k)))}"
+                     for k in ("sl", "tgt") if exit_rules.parse(r.get("c_" + k))]
+            r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
+            r["rules_edit"] = engine.order_rule_editable(r)
         table.rows = list(reversed(engine.order_log))
         table.update()
         s = engine.pnl_summary()

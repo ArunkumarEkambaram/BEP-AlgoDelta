@@ -8,6 +8,7 @@ its state; each change bumps a version number so a page knows when to redraw. Al
 every open tab shows once.
 """
 import csv
+import json
 import os
 from datetime import datetime
 
@@ -15,6 +16,7 @@ from nicegui import run
 
 import bep
 import config
+import exit_rules
 import market_utils
 import notifier
 import order_bridge
@@ -26,7 +28,7 @@ from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
-                      "expiry", "qty", "exit", "exit_time", "exit_reason"]
+                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done"]
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
 
@@ -157,7 +159,6 @@ class Engine:
             self.log(f"Could not update the orders file ({ex}).")
 
     def add_order_row(self, sig, res):
-        import json
         row = {
             "id": len(self.order_log), "time": _stamp(), "index": sig["index"], "opt": sig["opt"],
             "strike": sig["strike"], "kind": sig.get("kind_label", "Opening candle"), "bep": round(float(sig["bep"]), 2),
@@ -165,6 +166,8 @@ class Engine:
             "detail": res["detail"], "payload": json.dumps(res["payload"]),
             "expiry": sig.get("expiry") or "", "qty": config.AUTO_ORDER[sig["index"]]["qty"],
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
+            "c_sl": (sig.get("app_rules") or {}).get("c_sl", ""), "c_tgt": (sig.get("app_rules") or {}).get("c_tgt", ""),
+            "c_done": "",
         }
         self.order_log.append(row)
         self._save_order_row(row)
@@ -324,10 +327,20 @@ class Engine:
         label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
                  "common": "Manual — common price"}[kind]
         tgt_type, tgt = self.row_target(name, r)
+        params, app_rules = {"tgt": tgt, "tgt_type": tgt_type}, {}
+        for k in ("sl", "tgt"):                       # the row's own SL / Target (popup in Order Management)
+            rule = exit_rules.parse(r.get("c_" + k))
+            if not rule:
+                continue
+            if rule["type"] == "CANDLE":              # watched by the app -> AlgoDelta must not hold its own
+                params["is_" + k] = False
+                app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
+            else:                                     # LTP / POINT -> sent to AlgoDelta as this order's value
+                params[k], params[k + "_type"] = rule["value"], rule["type"]
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "bep": r["price"],
                "ltp": r["last_close"] if r["last_close"] is not None else r["trig_close"],
                "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
-               "kind_label": label, "time": _stamp(), "params": {"tgt": tgt, "tgt_type": tgt_type}}
+               "kind_label": label, "time": _stamp(), "params": params, "app_rules": app_rules}
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
         res = await run.io_bound(order_bridge.send_order, sig)
@@ -521,10 +534,13 @@ class Engine:
             self.log(f"Order tracking error: {ex}")
             return
         if updates:
-            new_exits = []
+            new_exits, custom_exits = [], []
             for r in self.order_log:
                 if r["id"] in updates:
                     u = updates[r["id"]]
+                    hit = u.pop("custom_hit", None)
+                    if hit and r.get("status") == "SENT" and not r.get("c_done"):
+                        custom_exits.append((r, hit))
                     if u.pop("exit_new", False):
                         u["detail"] = f"{r.get('detail', '')} | Exit: {u['exit_reason']} {u['exit_time']}".strip(" |")
                         new_exits.append(r)
@@ -532,9 +548,39 @@ class Engine:
             for r in new_exits:
                 self.log(f"DRY RUN {r['index']} {r['opt']} {r['strike']}: simulated exit {r['exit_reason']} at "
                          f"{r['exit_time']}, price {r['exit']} -> {r['points']} points, P&L {r['pnl']}")
-            if new_exits:
+            for r, (price, at, reason) in custom_exits:
+                mon = self.monitors.get(r["index"])
+                res = await run.io_bound(order_bridge.send_squareoff, r["index"], r["opt"], r["strike"],
+                                         r.get("expiry") or (mon.expiry if mon else None), f"{reason} at {at}")
+                r["c_done"] = f"{at} {reason} {res['status'].upper()}"
+                r["detail"] = f"{r.get('detail', '')} | {reason} {at} ({price}): square-off {res['status'].upper()}".strip(" |")
+                self.log(res["message"])
+                self.notify(f"{r['index']} {r['strike']}{r['opt']}: {reason} at {at} - square-off {res['status'].upper()}",
+                            "warning" if res["status"] == "sent" else "negative",
+                            f"{r['index']} square-off {r['strike']}{r['opt']}")
+            if new_exits or custom_exits:
                 self._rewrite_orders_file()
             self.bump("orders")
+
+    # ------------------------------------------------------------------ per-order SL / Target (Order Details)
+    @staticmethod
+    def order_rule_editable(r) -> bool:
+        return (r.get("status") in ("SENT", "DRY RUN") and r.get("kind", "Opening candle") != "Opening candle"
+                and trade_tracker._f(r.get("exit")) is None and not r.get("c_done"))
+
+    def set_order_custom(self, row_id, kind, rule):
+        """Sets (rule) or clears (None) an order's own SL / Target after it was placed. Watched by the app;
+        AlgoDelta's original SL / Target stay active too (no modify syntax), so whichever hits first exits."""
+        r = next((o for o in self.order_log if o["id"] == row_id), None)
+        if not r or not self.order_rule_editable(r):
+            return False
+        r["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule else ""
+        what = "SL" if kind == "sl" else "Target"
+        self.log(f"{r['index']} {r['strike']}{r['opt']} order: {what} "
+                 + (f"set to {exit_rules.describe(rule)}" if rule else "removed"))
+        self._rewrite_orders_file()
+        self.bump("orders")
+        return True
 
 
 engine = Engine()

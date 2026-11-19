@@ -78,6 +78,11 @@ def build_payload(sig: dict, template: dict = None, params: dict = None) -> dict
         "trail_type": ctx["trail_type"], "trail_trigger": ctx["trail_trigger"],
         "trail_gap": ctx["trail_gap"], "trail_point": ctx["trail_point"],
     })
+    # A CANDLE SL / Target is watched by the app (square-off when hit), so AlgoDelta must not hold its own.
+    if p.get("is_sl") is False:
+        payload.update(is_sl=False, is_trail_set=False)
+    if p.get("is_tgt") is False:
+        payload["is_tgt"] = False
     return payload
 
 
