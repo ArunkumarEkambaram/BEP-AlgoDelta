@@ -2,8 +2,9 @@
 app.py - NiceGUI screens for the BEP Support monitor (single-page app).
 
 Layout: a fixed header (NIFTY LTP, status, connection, Dry run / LIVE, Pause buttons, theme) and a left navigation
-drawer with six pages served by ui.sub_pages (no full page reloads):
-  Dashboard . BEP Support . Order Management . Order Details . Setup (once a day) . Logs
+drawer with pages served by ui.sub_pages (no full page reloads):
+  Dashboard . BEP Support . Order Management (group: Same strike . Pair . BEP Support \u2b50) . Order Details
+  . Setup (once a day) . Logs
 All trading logic runs once in the background engine (engine.py); pages only read its state and redraw when the
 matching version number changes.
 """
@@ -51,14 +52,22 @@ BEP_EXPORT_COLUMNS = [
 SUPPORT_HELD = ("", "")                                   # default table colours (white text in dark mode)
 SUPPORT_RED = ("rgba(239,68,68,0.16)", "#f87171")
 
+OM_ROOT = "/order-management"
+# Order Management sub-pages: (path, icon, label, row kind). Add a tuple here (and a page builder) for a new one.
+OM_SUB = [
+    (OM_ROOT + "/same-strike", "price_change", "Same strike", "same"),
+    (OM_ROOT + "/pair", "compare_arrows", "Pair (CE vs PE)", "pair"),
+    (OM_ROOT + "/bep-star", "star", "BEP Support \u2b50", "star"),
+]
 NAV = [
     ("/", "space_dashboard", "Dashboard"),
     ("/support", "stacked_line_chart", "BEP Support"),
-    ("/order-management", "tune", "Order Management"),
+    (OM_ROOT, "tune", "Order Management"),             # expandable group of OM_SUB
     ("/order-details", "receipt_long", "Order Details"),
     ("/setup", "settings", "Setup"),
     ("/logs", "article", "Logs"),
 ]
+ORDER_DONE = ("SENT", "DRY RUN", "sending")
 
 CSS = """
 <style>
@@ -69,6 +78,8 @@ CSS = """
   .q-card { border-radius: 12px; }
   .nav-item { border-radius: 8px; margin: 2px 8px; }
   .nav-active { background: rgba(59,130,246,.18); color: #60a5fa; font-weight: 600; }
+  .nav-sub { margin-left: 24px; min-height: 36px; white-space: nowrap; }
+  .nav-group-active { color: #60a5fa; font-weight: 600; }
   .stat-label { font-size: 12px; opacity: .65; text-transform: uppercase; letter-spacing: .04em; }
   .stat-value { font-size: 22px; font-weight: 700; }
   .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -88,6 +99,17 @@ def when_changed(keys, fn, interval: float = 1.0):
     ui.timer(interval, tick)
 
 
+def om_rows(kind, name=None):
+    """Order Management rows of one kind ("same" / "pair" / "star") for one index, or for all active ones."""
+    out = []
+    for n in ([name] if name else engine.active()):
+        for r in engine.watches[n].rows:
+            src = r.get("source")
+            if (src if src in ("pair", "star") else "same") == kind:
+                out.append(r)
+    return out
+
+
 def card_title(text, icon=None):
     with ui.row().classes("items-center gap-2"):
         if icon:
@@ -104,12 +126,19 @@ def root():
     ui.colors(primary="#3b82f6")
     ui.run_javascript('if (Notification.permission === "default") { Notification.requestPermission(); }')
     nav_items = {}
+    nav_state = {"path": None}
+    om_group = {}
 
     def set_active(path):
+        nav_state["path"] = path
         for p, item in nav_items.items():
             item.classes(remove="nav-active")
             if p == path:
                 item.classes(add="nav-active")
+        in_om = path.startswith(OM_ROOT)
+        if in_om and not om_group["exp"].value:
+            om_group["exp"].set_value(True)
+        om_group["exp"].props("header-class=" + ("nav-group-active" if in_om else '""'))
 
     with ui.header().classes("items-center gap-3 px-4 py-2 bg-[#0f172a] text-white border-b border-slate-800"):
         ui.button(icon="menu", on_click=lambda: drawer.toggle()).props("flat round color=white dense")
@@ -146,8 +175,29 @@ def root():
 
     ui.timer(1.0, refresh_header)
 
-    with ui.left_drawer(value=True, bordered=True).props("width=230").classes("pt-4") as drawer:
+    with ui.left_drawer(value=True, bordered=True).props("width=270").classes("pt-4") as drawer:
+        om_badges = {}
         for path, icon, label in NAV:
+            if path == OM_ROOT:
+                exp = ui.expansion(label, icon=icon).classes("nav-item").props("dense-toggle")
+                om_group["exp"] = exp
+
+                def opened(ev):                          # opening the group goes to its first sub-page
+                    if ev.value and not (nav_state["path"] or "").startswith(OM_ROOT):
+                        ui.navigate.to(OM_SUB[0][0])
+                exp.on_value_change(opened)
+                with exp:
+                    for sub_path, sub_icon, sub_label, kind in OM_SUB:
+                        with ui.item(on_click=lambda p=sub_path: ui.navigate.to(p)) \
+                                .classes("nav-item nav-sub cursor-pointer") as item:
+                            with ui.item_section().props("avatar").classes("min-w-0 pr-2"):
+                                ui.icon(sub_icon).classes("text-lg")
+                            with ui.item_section():
+                                ui.label(sub_label).classes("text-sm")
+                            with ui.item_section().props("side"):
+                                om_badges[kind] = ui.badge("0").props("rounded color=grey-7")
+                        nav_items[sub_path] = item
+                continue
             with ui.item(on_click=lambda p=path: ui.navigate.to(p)).classes("nav-item cursor-pointer") as item:
                 with ui.item_section().props("avatar"):
                     ui.icon(icon)
@@ -172,6 +222,15 @@ def root():
 
     ui.timer(0.5, pump_events)
 
+    def refresh_om_badges():
+        """Row count per Order Management sub-page; green when a row is triggered and waiting for Place order."""
+        for kind, badge in om_badges.items():
+            rows = om_rows(kind)
+            ready = any(r["status"] == "triggered" and r.get("order_status") not in ORDER_DONE for r in rows)
+            badge.set_text(str(len(rows)))
+            badge.props("color=" + ("green-7" if ready else "grey-7"))
+    ui.timer(1.0, refresh_om_badges)
+
     def page(path, builder):
         def build():
             set_active(path)
@@ -179,9 +238,12 @@ def root():
                 builder()
         return build
 
-    ui.sub_pages({path: page(path, b) for path, b in (
-        ("/", dashboard_page), ("/support", support_page), ("/order-management", watch_page),
-        ("/order-details", orders_page), ("/setup", setup_page), ("/logs", logs_page))}).classes("w-full")
+    routes = {path: page(path, b) for path, b in (
+        ("/", dashboard_page), ("/support", support_page),
+        (OM_SUB[0][0], same_strike_page), (OM_SUB[1][0], pair_page), (OM_SUB[2][0], star_page),
+        ("/order-details", orders_page), ("/setup", setup_page), ("/logs", logs_page))}
+    routes[OM_ROOT] = page(OM_SUB[0][0], same_strike_page)        # old link: opens Same strike
+    ui.sub_pages(routes).classes("w-full")
 
 
 # ====================================================================== Dashboard
@@ -450,7 +512,7 @@ def pair_section(rows, place, name):
     """Pair rows: CE strike vs PE strike around a common price."""
     card_title(f"Pairs \u2014 CE vs PE ({len(rows)})", "compare_arrows")
     if not rows:
-        ui.label("No pairs yet - choose 'Pair (CE vs PE)' above.").classes("text-sm opacity-70")
+        ui.label("No pairs yet - add one above.").classes("text-sm opacity-70")
         return
     with ui.grid(columns="240px 60px 60px 170px 1fr 230px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
         for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "SL / Target", ""):
@@ -473,95 +535,123 @@ def pair_section(rows, place, name):
                     .props("dense flat size=sm color=grey-6")
 
 
-def watch_page():
-    ui.label("Order Management").classes("text-2xl font-bold")
-    ui.label("Same strike: alerts when a leg's candle closes ABOVE the common price (crossing up from at or below); red = "
-             "closed back below after triggering. Pair: a leg closes above its price while the opponent closes below "
-             "price \u2212 buffer; after you order, the opponent closing back at or above that line squares off the "
-             "position (live) or records the exit (dry run). ⭐ rows are added automatically for a live first support of the day "
-             "inside the ATM window (Level = BEP); red when the board row turns red. Nothing is placed automatically: "
-             "use Place order.").classes("text-xs opacity-70")
+def om_header(title, help_text):
+    ui.label(f"Order Management — {title}").classes("text-2xl font-bold")
+    ui.label(help_text + " Nothing is placed automatically: use Place order.").classes("text-xs opacity-70")
+
+
+def om_list(name, title, icon, draw):
+    """Card that redraws one Order Management list whenever the engine's watch rows change."""
+    with ui.card().classes("w-full"):
+        card_title(f"{name} — {title}", icon)
+        holder = ui.column().classes("w-full")
+
+        async def place(row_id):
+            await engine.place_watch_order(name, row_id)
+
+        def render():
+            holder.clear()
+            with holder:
+                draw(place)
+        when_changed(["watch"], render)
+
+
+def tf_radio():
+    with ui.column().classes("gap-0"):
+        ui.label("Timeframe").classes("text-xs opacity-70")
+        return ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+
+
+def centre_strike(name):
+    mon = engine.monitors[name]
+    return mon.strikes[len(mon.strikes) // 2] if mon.strikes else None
+
+
+def same_strike_page():
+    om_header("Same strike", "Alerts when a leg's candle closes ABOVE the common price (crossing up from at or below), "
+              "once. Red = closed back below after triggering (no alert). Rows added before 09:15 use the first "
+              "candle's open as the previous price.")
     for name in engine.active():
-        mon, cw = engine.monitors[name], engine.watches[name]
+        step = config.INDEXES[name]["strike_interval"]
         with ui.card().classes("w-full"):
-            card_title(f"{name} \u2014 add", "add_circle")
-            mode = ui.toggle({"same": "Same strike", "pair": "Pair (CE vs PE)"}, value="same").props("dense no-caps")
-            centre = mon.strikes[len(mon.strikes) // 2] if mon.strikes else None
-            with ui.row().classes("items-end gap-6") as same_row:
-                cw_strike = ui.number("Strike", value=centre, step=config.INDEXES[name]["strike_interval"],
-                                      precision=0).classes("w-32")
+            card_title(f"{name} — add same strike", "add_circle")
+            with ui.row().classes("items-end gap-6"):
+                strike = ui.number("Strike", value=centre_strike(name), step=step, precision=0).classes("w-32")
                 with ui.column().classes("gap-0"):
                     ui.label("Leg").classes("text-xs opacity-70")
-                    cw_leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
-                cw_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
-            with ui.row().classes("items-end gap-6") as pair_row:
-                p_ce = ui.number("CE strike", value=centre, step=config.INDEXES[name]["strike_interval"],
-                                 precision=0).classes("w-32")
-                p_pe = ui.number("PE strike", value=centre, step=config.INDEXES[name]["strike_interval"],
-                                 precision=0).classes("w-32")
-                p_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
-                p_pe_price = ui.number("PE price (if different)", value=None, min=0, step=0.05).classes("w-44")
-                p_buffer = ui.number("Buffer (opponent below price \u2212 buffer)", value=1, min=0, step=0.05) \
-                    .classes("w-64")
-            same_row.bind_visibility_from(mode, "value", lambda v: v == "same")
-            pair_row.bind_visibility_from(mode, "value", lambda v: v == "pair")
-            with ui.row().classes("items-end gap-6"):
-                with ui.column().classes("gap-0"):
-                    ui.label("Timeframe").classes("text-xs opacity-70")
-                    cw_tf = ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+                    leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
+                price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                tf = tf_radio()
 
-                def add_watch(name=name, mode=mode, cw_strike=cw_strike, cw_leg=cw_leg, cw_price=cw_price, cw_tf=cw_tf,
-                              p_ce=p_ce, p_pe=p_pe, p_price=p_price, p_pe_price=p_pe_price, p_buffer=p_buffer):
-                    step = config.INDEXES[name]["strike_interval"]
-                    if mode.value == "pair":
-                        try:
-                            ce, pe, price = int(p_ce.value), int(p_pe.value), float(p_price.value)
-                            pe_price = float(p_pe_price.value) if p_pe_price.value else price
-                            buffer = float(p_buffer.value or 0)
-                        except (TypeError, ValueError):
-                            ui.notify("Enter the CE strike, PE strike and common price.", type="negative")
-                            return
-                        if min(ce, pe) <= 0 or ce % step or pe % step or price <= 0 or pe_price <= 0 or buffer < 0:
-                            ui.notify(f"Strikes must be multiples of {step}; prices above 0; buffer 0 or more.",
-                                      type="negative")
-                            return
-                        engine.add_pair(name, ce, pe, price, pe_price, buffer, int(cw_tf.value))
-                        ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}.", type="positive")
-                        return
+                def add(name=name, step=step, strike=strike, leg=leg, price=price, tf=tf):
                     try:
-                        strike, price = int(cw_strike.value), float(cw_price.value)
+                        k, p = int(strike.value), float(price.value)
                     except (TypeError, ValueError):
                         ui.notify("Enter a strike and a common price.", type="negative")
                         return
-                    if strike <= 0 or strike % step or price <= 0:
+                    if k <= 0 or k % step or p <= 0:
                         ui.notify(f"Strike must be a multiple of {step}; common price above 0.", type="negative")
                         return
-                    engine.add_watch(name, strike, cw_leg.value, price, int(cw_tf.value))
-                    ui.notify(f"Watching {strike} {cw_leg.value} at {price:g} ({cw_tf.value} min).", type="positive")
-                ui.button("Add", icon="add", on_click=add_watch)
+                    engine.add_watch(name, k, leg.value, p, int(tf.value))
+                    ui.notify(f"Watching {k} {leg.value} at {p:g} ({tf.value} min).", type="positive")
+                ui.button("Add", icon="add", on_click=add)
 
+        def draw(place, name=name):
+            rows = om_rows("same", name)
+            section(f"Same strike ({len(rows)})", "price_change", rows,
+                    "No same-strike rows yet - add one above.", place, name)
+        om_list(name, "watched strikes", "visibility", draw)
+
+
+def pair_page():
+    om_header("Pair (CE vs PE)", "Entry: a leg closes above its price while the opponent closes below price − "
+              "buffer (the leg must have been at or below its price first). After you order, the opponent closing "
+              "back at or above that line squares off the position (live) or records the exit (dry run).")
+    for name in engine.active():
+        step = config.INDEXES[name]["strike_interval"]
         with ui.card().classes("w-full"):
-            card_title(f"{name} — watched strikes", "visibility")
-            holder = ui.column().classes("w-full")
+            card_title(f"{name} — add pair", "add_circle")
+            with ui.row().classes("items-end gap-6"):
+                p_ce = ui.number("CE strike", value=centre_strike(name), step=step, precision=0).classes("w-32")
+                p_pe = ui.number("PE strike", value=centre_strike(name), step=step, precision=0).classes("w-32")
+                p_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                p_pe_price = ui.number("PE price (if different)", value=None, min=0, step=0.05).classes("w-44")
+                p_buffer = ui.number("Buffer (opponent below price − buffer)", value=1, min=0, step=0.05) \
+                    .classes("w-64")
+                tf = tf_radio()
 
-            async def place(row_id, name=name):
-                await engine.place_watch_order(name, row_id)
+                def add(name=name, step=step, p_ce=p_ce, p_pe=p_pe, p_price=p_price, p_pe_price=p_pe_price,
+                        p_buffer=p_buffer, tf=tf):
+                    try:
+                        ce, pe, price = int(p_ce.value), int(p_pe.value), float(p_price.value)
+                        pe_price = float(p_pe_price.value) if p_pe_price.value else price
+                        buffer = float(p_buffer.value or 0)
+                    except (TypeError, ValueError):
+                        ui.notify("Enter the CE strike, PE strike and common price.", type="negative")
+                        return
+                    if min(ce, pe) <= 0 or ce % step or pe % step or price <= 0 or pe_price <= 0 or buffer < 0:
+                        ui.notify(f"Strikes must be multiples of {step}; prices above 0; buffer 0 or more.",
+                                  type="negative")
+                        return
+                    engine.add_pair(name, ce, pe, price, pe_price, buffer, int(tf.value))
+                    ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}.", type="positive")
+                ui.button("Add", icon="add", on_click=add)
 
-            def render(cw=cw, holder=holder, place=place, name=name):
-                holder.clear()
-                with holder:
-                    manual = [r for r in cw.rows if r.get("source") not in ("star", "pair")]
-                    pairs = [r for r in cw.rows if r.get("source") == "pair"]
-                    stars = [r for r in cw.rows if r.get("source") == "star"]
-                    section(f"Common Price ({len(manual)})", "price_change", manual,
-                            "No common price strikes yet - add one above.", place, name)
-                    ui.separator().classes("my-3")
-                    pair_section(pairs, place, name)
-                    ui.separator().classes("my-3")
-                    section(f"BEP Support \u2b50 ({len(stars)})", "star", stars,
-                            "No \u2b50 yet - live first supports inside the ATM window appear here automatically.",
-                            place, name)
-            when_changed(["watch"], render)
+        def draw(place, name=name):
+            pair_section(om_rows("pair", name), place, name)
+        om_list(name, "watched pairs", "visibility", draw)
+
+
+def star_page():
+    om_header("BEP Support ⭐", "Rows are added automatically for a live first support of the day inside the ATM "
+              "window (Level = BEP) and are ready to order. Red when the BEP Support board row fails. A 09:15 ⭐ is "
+              "skipped if that side already has its opening order.")
+    for name in engine.active():
+        def draw(place, name=name):
+            rows = om_rows("star", name)
+            section(f"BEP Support ⭐ ({len(rows)})", "star", rows,
+                    "No ⭐ yet - live first supports inside the ATM window appear here automatically.", place, name)
+        om_list(name, "first supports", "star", draw)
 
 
 # ====================================================================== Orders

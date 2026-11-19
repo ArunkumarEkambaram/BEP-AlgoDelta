@@ -17,7 +17,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - `app.py`: NiceGUI **single-page app** (`ui.sub_pages`), dark theme with a toggle, a header (LTP, status, Upstox ✓, DRY RUN/LIVE, Pause alerts, Pause algo) and a left nav. The pages are:
   - **Dashboard**
   - **BEP Support**
-  - **Order Management**
+  - **Order Management**: a nav group with three sub-pages, each with its own Add form and list. They are `/order-management/same-strike`, `/order-management/pair` and `/order-management/bep-star`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`.
   - **Order Details**
   - **Setup**
   - **Logs**
