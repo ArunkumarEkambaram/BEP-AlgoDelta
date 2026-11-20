@@ -326,16 +326,18 @@ class Engine:
             self.bump("watch")
         return ok
 
-    def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf, mode=None):
-        r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now(), mode)
-        self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min"
+    def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf, mode=None, trig_on="close"):
+        r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now(), mode, trig_on)
+        self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min, "
+                 f"trigger on {'live LTP' if trig_on == 'ltp' else 'candle close'}"
                  + (", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
 
-    def add_watch(self, name, strike, leg, price, tf, mode=None):
-        rows = self.watches[name].add(strike, leg, price, tf, _now(), mode)
+    def add_watch(self, name, strike, leg, price, tf, mode=None, trig_on="close"):
+        rows = self.watches[name].add(strike, leg, price, tf, _now(), mode, trig_on)
         self.log(f"{name} common price watch added: "
                  + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows)
+                 + f", trigger on {'live LTP' if trig_on == 'ltp' else 'candle close'}"
                  + (", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
 
@@ -371,8 +373,8 @@ class Engine:
             self.bump("watch")
         return ok
 
-    def edit_watch(self, name, row_id, tf, price, pe_price=None, buffer=None) -> bool:
-        ok = self.watches[name].edit(row_id, tf, price, pe_price, buffer)
+    def edit_watch(self, name, row_id, tf, price, pe_price=None, buffer=None, trig_on=None) -> bool:
+        ok = self.watches[name].edit(row_id, tf, price, pe_price, buffer, trig_on)
         if ok:
             r = self.watches[name].get(row_id)
             what = CommonWatch.pair_title(r) + f", buffer {r['buffer']:g}" if r.get("kind") == "pair" else \
@@ -571,9 +573,25 @@ class Engine:
                                     {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
                                     f"{name} entry {r['strike']}{r['opt']}")
 
+    async def check_live_watch(self):
+        """Every OPTION_LTP_SECONDS in market hours: arms Same strike / Pair legs on the live LTP and fires rows set
+        to Trigger on live LTP (alert + Place order ready, like a candle trigger)."""
+        now = _now()
+        for name in self.active():
+            fired, changed = self.watches[name].live_step(
+                lambda strike, opt, name=name: self.option_ltp.get((name, int(strike), opt)), now)
+            for r in fired:
+                label = notifier.common_label(r)
+                self.log("COMMON PRICE (live LTP): " + label)
+                if not config.ALERTS_PAUSED:
+                    self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
+            if changed:
+                self.bump("watch")
+
     async def option_tick(self):
         await self.refresh_option_ltps()
         if self.connected and market_utils.is_market_open():
+            await self.check_live_watch()
             await self.check_pending_entries()
             await self.check_limits()
             await self.check_app_trails()
