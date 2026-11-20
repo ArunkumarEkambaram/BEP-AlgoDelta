@@ -8,6 +8,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - **Always discuss requirements before writing code.** Ask questions with "Suggested:" answers and wait for the user's go-ahead.
 - Work on a branch, open a PR, and merge **only when the user says "merge PR #n"**. This applies to **every** change, docs-only ones included (no direct pushes to `main`; confirmed again after PR #17).
 - During market hours, **don't push**. Keep work on a local branch until the user says so.
+- **Never change `main` directly** (no commits, pushes or merges to it on Claude's own initiative), especially near or during market hours. Every change, docs-only ones included, goes to a **new branch**. It's merged later, only when the user says "merge PR #n". The user's running app stays on the `main` it pulled. (Asked on 20 Nov 2026, just before the open.)
 - After merging, the user runs `git pull origin main` and restarts the app.
 - `__pycache__/`, `settings.json`, `upstox_token.json`, `orders_*.csv` and `common_watch_*.json` are git-ignored. Never commit them.
 - The cloud session can't delete GitHub branches (proxy 403). The user deletes merged branches, or turns on "Automatically delete head branches".
