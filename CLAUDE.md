@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #28; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #29; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -172,6 +172,14 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - It refreshes on strike blur, on a leg change, with ↻, and once when the page opens (`engine.quote_option`).
    - The Common price is **not** pre-filled with the LTP (it's a level the user chooses).
 
+22. **Open (live) P&L, calculated locally (PR #29):**
+   - Before this, P&L showed only after the exit (0 while open).
+   - Open position: **(live LTP − Entry) × qty** (`Engine.open_pnl`), qty = filled units (live) or lots × lot size.
+   - **No extra API call:** the LTP is the one 2 s batch (`refresh_option_ltps`, which now covers every open order and updates its `ltp_live`). `trade_tracker.compute(..., known=option_ltp)` only fetches options not in that batch.
+   - **Cards:** P&L in green/red with `+x pts · open`; the realized P&L after the exit.
+   - **Order Details:** the Captured Points / P&L ₹ columns show `x (open)` for open orders (`open_points`/`open_pnl`, not saved), and the summary adds "open n: P&L ₹x" (the closed totals are unchanged).
+   - Upstox is still needed for the LTP itself and for live fills/exits (trade book every 30 s).
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -196,7 +204,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #28: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #29: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
@@ -219,4 +227,4 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     2. Build Upstox direct **alongside** AlgoDelta, with a Setup switch "AlgoDelta / Upstox direct"; test with 1 lot.
     3. Drop AlgoDelta once direct is proven.
   - **Next step when resumed:** write up the questions for Phase 1 (cloud hosting) or the Upstox direct module, as the user chooses.
-- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).
+- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now); the **Upstox WebSocket market feed** (prices pushed in real time instead of the 2 s polling; read-only, no static IP; medium effort, later).
