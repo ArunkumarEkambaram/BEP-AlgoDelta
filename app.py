@@ -1402,6 +1402,30 @@ def tf_radio():
         return ui.radio({1: "1 min", 3: "3 min", 5: "5 min"}, value=5).props("inline dense")
 
 
+def form_ltp(name, legs):
+    """Add-form LTP box (Same strike / Pair): legs() -> [(strike value, "CE"/"PE"), ...]. Shows e.g.
+    "CE 120.50 · PE 98.20". Returns the refresh coroutine (strike blur / leg change / the \u21bb button)."""
+    with ui.column().classes("gap-0 items-start"):
+        with ui.row().classes("items-center gap-0 no-wrap"):
+            ui.label("LTP").classes("text-xs opacity-70")
+            btn = ui.button(icon="refresh").props("flat dense round size=xs color=primary").tooltip("Refresh LTP")
+        lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
+
+    async def refresh(_e=None):
+        parts = []
+        for k, opt in legs():
+            try:
+                k = int(k)
+            except (TypeError, ValueError):
+                continue
+            v = await engine.quote_option(name, k, opt)
+            parts.append(f"{opt} {v:.2f}" if v is not None else f"{opt} --")
+        lbl.set_text(" \u00b7 ".join(parts) or "--")
+    btn.on_click(refresh)
+    ui.timer(0.5, refresh, once=True)                # first value for the default strike
+    return refresh
+
+
 TRIG_ON = {"close": "Candle close", "ltp": "Live LTP"}
 
 
@@ -1435,6 +1459,10 @@ def same_strike_page():
                     ui.label("Leg").classes("text-xs opacity-70")
                     leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
                 price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
+                ltp_refresh = form_ltp(name, lambda strike=strike, leg=leg: [
+                    (strike.value, o) for o in (("CE", "PE") if leg.value == "Both" else (leg.value,))])
+                strike.on("blur", ltp_refresh)
+                leg.on_value_change(ltp_refresh)
                 tf = tf_radio()
                 trig = trig_toggle()
                 omode = order_mode_toggle()
@@ -1477,6 +1505,9 @@ def pair_page():
                 p_pe = ui.number("PE strike", value=centre_strike(name), step=step, precision=0).classes("w-32")
                 p_price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
                 p_pe_price = ui.number("PE price (if different)", value=None, min=0, step=0.05).classes("w-44")
+                ltp_refresh = form_ltp(name, lambda p_ce=p_ce, p_pe=p_pe: [(p_ce.value, "CE"), (p_pe.value, "PE")])
+                p_ce.on("blur", ltp_refresh)
+                p_pe.on("blur", ltp_refresh)
                 p_buffer = ui.number("Buffer (opponent below price − buffer)", value=1, min=0, step=0.05) \
                     .classes("w-64")
                 tf = tf_radio()
