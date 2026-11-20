@@ -1383,9 +1383,9 @@ def manual_page():
                 lots = ui.number("Lots", value=config.AUTO_ORDER[name]["qty"], min=1, step=1, precision=0).classes("w-24")
                 with ui.column().classes("gap-0"):
                     ui.label("Order").classes("text-xs opacity-70")
-                    mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit"}, value="price") \
+                    mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit"}, value="limit") \
                         .props("dense no-caps")
-                price = ui.number("Entry price", value=None, min=0, step=0.05).classes("w-32")
+                price = ui.number("Limit price", value=None, min=0, step=0.05).classes("w-32")
                 price.bind_visibility_from(mode, "value", lambda v: v in ("price", "limit"))
                 mode.on_value_change(lambda e, price=price: price.props(
                     f'label="{"Limit price" if e.value == "limit" else "Entry price"}"'))
