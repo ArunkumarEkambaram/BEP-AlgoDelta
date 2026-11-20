@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #30; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #31; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -18,7 +18,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - `app.py`: NiceGUI **single-page app** (`ui.sub_pages`), dark theme with a toggle, a header (LTP, status, Upstox ✓, DRY RUN/LIVE, Pause alerts, Pause algo) and a left nav. The pages are:
   - **Dashboard**
   - **BEP Support**
-  - **Order Management**: a nav group with three sub-pages, each with its own Add form and list. They are `/order-management/same-strike`, `/order-management/pair` and `/order-management/bep-star`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`. Each row is an **order card** (like AlgoDelta's): a header with symbol/Buy/INTRADAY/TF, a status chip (WAITING, TRIGGERED, ORDERED · SENT/DRY RUN, EXITED, FAILED) and ⚡ Place / ✕ Delete / ✏ Edit (WAITING only). The body shows Entry Price, Quantity (lots, editable per card until ordered), P&L, live LTP, Entry level, Target, Stoploss and Trailing (per card, PR #15). A "Compact view" switch brings back the table. Live option LTP comes from `engine.refresh_option_ltps` (one batched call every `OPTION_LTP_SECONDS` = 2 s). Each card is linked to its order through `order_id`, which supplies Entry and P&L. **Entry at a price (PR C):**
+  - **Order Management**: a nav group with **four** sub-pages, each with its own Add form (⭐ has none, rows are added automatically) and list. They are `/order-management/same-strike`, `/order-management/pair`, `/order-management/bep-star` and `/order-management/manual-entry`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`. Each row is an **order card** (like AlgoDelta's): a header with symbol/Buy/INTRADAY/TF, a status chip (WAITING, TRIGGERED, PENDING, ORDERED · SENT/DRY RUN, SQUARING OFF, EXITED · reason, FAILED, plus the limit chips of decision 16) and ⚡ Place / ✕ Delete / ✏ Edit (WAITING only). The body shows Entry Price (**Entry (filled)** once ordered), Quantity (lots, editable per card until ordered), P&L (**open P&L while running**, decision 22), live LTP, the level box (**Common price / Pair price / BEP / Order type**, decision 19), Target, Stoploss and Trailing (per card, PR #15; editable as app rules while the order is open, decision 18). A "Compact view" switch brings back the table. Live option LTP comes from `engine.refresh_option_ltps` (one batched call every `OPTION_LTP_SECONDS` = 2 s). Each card is linked to its order through `order_id`, which supplies Entry and the realized P&L (open P&L is computed locally from the 2 s LTP). **Entry at a price (PR C):**
     - Entry Price on a card is editable until it's ordered. Empty means a market order at ⚡.
     - With a price, ⚡ (only once TRIGGERED, so no pre-arm) **arms** the card. The chip shows `PENDING @ 95.00 ↓`, the app checks the live LTP every 2 s, and when LTP is ≤ the price (↓ dip) or ≥ it (↑ breakout) it sends the normal market `strategy_order`.
     - The direction is set automatically from the LTP at arming, and the arrow flips it.
@@ -48,14 +48,14 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **One CE and one PE per day.** If both strikes qualify, the one closest to the pre-open price wins. SENT, DRY RUN and FAILED lock the side; BLOCKED frees it. The lock is restored from today's orders file.
    - **No plan before 09:15** (late start or restart) means **no 09:15 order** that day.
    - Still unverified live: whether Upstox's NIFTY value between 09:08 and 09:15 equals the pre-open price. A manual override was offered if it doesn't.
-6. **Order Details:** Entry, Exit, LTP, Captured Points (**Exit − Entry, shown only once exited**) and P&L ₹.
+6. **Order Details:** Entry, Exit, LTP, Captured Points (**Exit − Entry** once exited; while open, `x (open)` from the live LTP, decision 22) and P&L ₹ (the same).
    - **Live:** Upstox trade book (`get-trades-for-day`, every 30 s). Fills are matched by option and **shared FIFO between orders on the same option** (PR #10).
    - **Dry run:** entry = LTP at the signal. The exit is **simulated** from 1-min candles using the order's SL/Target/trail (SL first if both hit in the same minute; 15:15 square-off). It's saved in the orders file.
    - The JSON column is hidden in the table but kept in the file and the CSV/XLSX downloads.
-7. **Order Management** (manual trades: alert, then **Place order**; nothing automatic). The page has three sections:
-   - **Same strike:** strike, Leg (Both/CE/PE), common price, timeframe 3/5 min. Fires when a close crosses above the price (previous close at or below it), **once**. A later close below turns the row red, with no alert. Rows added pre-open use the **first candle's open** as the previous price, so the earliest trigger is 09:20 / 09:18 (PR #10).
+7. **Order Management** (manual trades: alert, then **Place order**; nothing automatic). Sections (now sub-pages; Manual Entry came later, decision 13):
+   - **Same strike:** strike, Leg (Both/CE/PE), common price, timeframe **1/3/5 min**, Trigger on **Candle close / Live LTP**, Order **Strategy / Limit** (decisions 17, 20). Fires when an **armed** leg (it traded at or below the price after the add: close, wick or live LTP) closes above the price, or with Live LTP its LTP goes above it, **once**. A later close below turns the row red, with no alert. Rows added pre-open use the **first candle's open** as the previous price, so the earliest trigger is 09:20 / 09:18 (PR #10).
    - **Pair (CE vs PE):** CE strike, PE strike, common price (optional separate PE price), buffer (default 1).
-     - **Entry, either side:** a leg closes above its price while the opponent closes below price − buffer. The leg must have been at or below its price first ("armed").
+     - **Entry, either side:** a leg closes above its price while the opponent closes below price − buffer (or, with Trigger on Live LTP, the same on the LTPs). The leg must have traded at or below its price first ("armed": a close, a wick or the live LTP, decision 20).
      - **Exit:** the order's SL/Target, **or** the opponent closing at or above price − buffer. Live, that sends `squareoff_position` automatically, and it isn't blocked by Pause algo or the daily limit. In dry run the exit is recorded.
    - **BEP Support ⭐:** a live first support inside the ATM window is added automatically and is ready to order (option A). It turns red when the board row fails. A 09:15 ⭐ is skipped if that side already has its opening order. Same-strike and ⭐ rows can coexist at different levels.
    - "Both" legs are independent rows (no change wanted).
@@ -87,7 +87,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Verified by the user:** AlgoDelta's square-off closes the position, including its pending SL/Target.
 13. **Manual Entry (PR #17):**
    - A 4th Order Management sub-page, `/order-management/manual-entry`, with rows of source `manual`.
-   - **Form:** Strike, CE/PE, Lots, **Price / Market** and Entry price (pre-filled with the live LTP from `engine.quote_option`).
+   - **Form:** Strike, CE/PE, Lots, **Price / Market / Limit** (Limit added in PR #20 and the default since PR #21) and the price (pre-filled with the live LTP from `engine.quote_option`).
    - **Buttons:** **Add card** (set Target/SL/Trail on the card, then ⚡) or **Add & place** (uses the defaults).
    - The card is ready at once (TRIGGERED, no candle checks). **Price** reuses the PENDING entry logic; **Market** sends `strategy_order` now. AlgoDelta holds the SL, Target and trail.
    - Setup has a **Manual entry** default target (`tgt_manual`).
@@ -212,7 +212,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #30: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
