@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #21; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #22; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -119,6 +119,22 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Restart:** the state is in the orders file (`mg`), so watching resumes.
    - **Order Details:** shows the limit state and app rules in SL/Target, plus a Cancel order action. The SL/Target can't be edited after placing (`order_rule_editable` is false).
 
+17. **Limit for Same strike, Pair and ⭐ (PR #22):**
+   - **Choosing the type:**
+     - The Same strike and Pair Add forms have an **Order: Strategy | Limit** toggle (default **Strategy**).
+     - Each card (Same strike, Pair, ⭐) has the same toggle in its Entry Price box until it's ordered (`CommonWatch.set_mode`, which resets the Entry Price).
+     - Compact view has an **Order** column (`Strategy` / `Limit @ x`); click it for a popup.
+     - Anything other than Limit sends `strategy_order` (market, or the app-side PENDING entry when an Entry Price is set).
+   - **Limit price:**
+     - It's the card's Entry Price, pre-filled with the row's level (common price / ⭐ BEP).
+     - Pair before it fires: the fired leg's own price (`Engine.limit_price`).
+     - Editing a Same-strike level moves a limit price that was still equal to the level.
+   - **Sending:** ⚡ works only once TRIGGERED. The order goes through `place_limit_order` (the same app-watched SL/Target/trail as Manual Limit, using the per-type default targets).
+   - **Auto-cancel:**
+     - A card that turns FAILED/EXITED cancels its open limit (`cancel_dead_limits`, each scan); a filled part stays protected.
+     - Pair opponent exit: a filled limit is squared off and an open one is cancelled (`handle_pair_exits`).
+     - Delete and 15:15 work as for Manual.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -143,5 +159,5 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 and #21: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #22: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).

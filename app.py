@@ -499,8 +499,8 @@ def section(title, icon, rows, empty_text, place, name):
     if not rows:
         ui.label(empty_text).classes("text-sm opacity-70")
         return
-    with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 230px 200px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "SL / Target", ""):
+    with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 130px 230px 200px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "Order", "SL / Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
@@ -510,6 +510,7 @@ def section(title, icon, rows, empty_text, place, name):
                      CommonWatch.status_text(r)]
             for txt in cells:
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            order_type_cell(name, r)
             sl_tgt_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
@@ -520,14 +521,73 @@ def section(title, icon, rows, empty_text, place, name):
                     .props("dense flat size=sm color=grey-6")
 
 
+def order_type_text(r) -> str:
+    if r.get("entry_mode") != "limit":
+        return "Strategy"
+    p = engine.limit_price(r)
+    return f"Limit @ {p:g}" if p else "Limit @ leg price"
+
+
+def order_type_editable(r) -> bool:
+    return (r.get("source") != "manual" and r["status"] not in ("failed", "exited")
+            and (r.get("order_status") or "") not in ORDER_DONE + ("PENDING",))
+
+
+def order_type_cell(name, r):
+    """Compact view: the row's order type; click to change it (until ordered)."""
+    lbl = ui.label(order_type_text(r)).classes(
+        "text-sm px-2 py-1 rounded " + ("text-amber-5" if r.get("entry_mode") == "limit" else ""))
+    if order_type_editable(r):
+        lbl.classes("cursor-pointer underline decoration-dotted")
+        lbl.on("click", lambda: order_type_dialog(name, r))
+        lbl.tooltip("Click to choose Strategy or Limit")
+
+
+def order_type_dialog(name, r):
+    """Strategy (strategy_order) or Limit (limit_order at a price; SL / Target watched by the app)."""
+    pair_unfired = r.get("kind") == "pair" and not r.get("opt")
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 380px"):
+        ui.label("Order type").classes("text-lg font-bold")
+        mode = ui.toggle({"strategy": "Strategy", "limit": "Limit"},
+                         value="limit" if r.get("entry_mode") == "limit" else "strategy").props("no-caps")
+        price = ui.number("Limit price" + (" (empty = the fired leg's price)" if pair_unfired else " (empty = the level)"),
+                          value=r.get("entry_price") if r.get("entry_mode") == "limit" else r.get("price"),
+                          min=0, step=0.05).classes("w-full")
+        price.bind_visibility_from(mode, "value", lambda v: v == "limit")
+        ui.label("Strategy = AlgoDelta strategy_order (market; AlgoDelta holds SL / Target / trailing). "
+                 "Limit = AlgoDelta limit_order at the price; SL / Target / trailing are watched by this app "
+                 "(square-off when hit), cancelled if the card fails, at 15:15 or when deleted.").classes("text-xs opacity-70")
+
+        def save():
+            limit = mode.value == "limit"
+            if limit and price.value is not None and float(price.value) <= 0:
+                ui.notify("The limit price must be above 0.", type="negative")
+                return
+            engine.set_watch_mode(name, r["id"], "limit" if limit else None)
+            if limit and price.value:
+                engine.set_watch_entry(name, r["id"], float(price.value))
+            dlg.close()
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Close", on_click=dlg.close).props("flat")
+            ui.button("Save", on_click=save)
+    dlg.open()
+
+
+def order_mode_toggle():
+    """Add forms: Order type toggle (Strategy default)."""
+    with ui.column().classes("gap-0"):
+        ui.label("Order").classes("text-xs opacity-70")
+        return ui.toggle({"strategy": "Strategy", "limit": "Limit"}, value="strategy").props("dense no-caps")
+
+
 def pair_section(rows, place, name):
     """Pair rows: CE strike vs PE strike around a common price."""
     card_title(f"Pairs \u2014 CE vs PE ({len(rows)})", "compare_arrows")
     if not rows:
         ui.label("No pairs yet - add one above.").classes("text-sm opacity-70")
         return
-    with ui.grid(columns="240px 60px 60px 170px 1fr 230px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "SL / Target", ""):
+    with ui.grid(columns="240px 60px 60px 170px 1fr 130px 230px 210px").classes("w-full items-center gap-x-3 gap-y-1"):
+        for head in ("Pair", "Buffer", "TF", "Last close CE \u00b7 PE", "Status", "Order", "SL / Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2",
@@ -536,6 +596,7 @@ def pair_section(rows, place, name):
             closes = " \u00b7 ".join(f"{v:.2f}" if v is not None else "--" for v in lc)
             for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}", f"{r['tf']} min", closes, CommonWatch.status_text(r)):
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
+            order_type_cell(name, r)
             sl_tgt_cell(name, r)
             with ui.row().classes("gap-1 no-wrap"):
                 done = r["order_status"] in ("SENT", "DRY RUN", "sending")
@@ -975,8 +1036,13 @@ def entry_price_box(name, r, pending):
             ui.icon("south" if p["dir"] == "below" else "north").classes("text-amber-5")
         ui.label(f"waiting \u00b7 armed {p['armed_at']}").classes("text-xs text-amber-5")
         return
-    if r.get("entry_mode") == "limit":                # limit order: the price always set, no direction
-        inp = ui.number(value=price, min=0.05, step=0.05) \
+    if r.get("source") != "manual":                   # Same strike / Pair / \u2b50: Strategy or Limit
+        tg = ui.toggle({"strategy": "Strategy", "limit": "Limit"},
+                       value="limit" if r.get("entry_mode") == "limit" else "strategy").props("dense no-caps size=sm")
+        tg.on_value_change(lambda e: engine.set_watch_mode(name, r["id"], "limit" if e.value == "limit" else None))
+    if r.get("entry_mode") == "limit":                # limit order: a price, no direction
+        manual = r.get("source") == "manual"
+        inp = ui.number(value=price, min=0.05, step=0.05, placeholder="" if manual else "level") \
             .props("dense borderless input-class=text-center").classes("w-20 text-lg font-bold")
 
         def save_limit(_e=None):
@@ -985,7 +1051,8 @@ def entry_price_box(name, r, pending):
                 inp.set_value(r.get("entry_price"))
         inp.on("blur", save_limit)
         inp.on("keydown.enter", save_limit)
-        ui.label("LIMIT order at \u26a1").classes("text-xs text-amber-5")
+        ui.label("LIMIT order at \u26a1" if price or manual else "LIMIT at the fired leg's price") \
+            .classes("text-xs text-amber-5")
         return
     if not direction and price:
         ltp = engine.row_live_ltp(name, r)
@@ -1053,8 +1120,8 @@ def order_card(name, r, place, live):
                     can_place = r["status"] == "triggered" and not done
                     b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
                         .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
-                    b.tooltip(f"Send a LIMIT order at {r['entry_price']:.2f}" if r.get("entry_mode") == "limit"
-                              and r.get("entry_price") else
+                    b.tooltip(f"Send a LIMIT order at {engine.limit_price(r):.2f}" if r.get("entry_mode") == "limit"
+                              and engine.limit_price(r) else "Send a LIMIT order" if r.get("entry_mode") == "limit" else
                               f"Arm: send when LTP reaches {r['entry_price']:.2f}" if r.get("entry_price")
                               else "Place order now (market)")
                     b.set_enabled(can_place)
@@ -1194,13 +1261,14 @@ def make_place(name):
             if hasattr(res, "__await__"):
                 await res
         if r.get("entry_mode") == "limit":
-            if not r.get("entry_price"):
+            lp = engine.limit_price(r)
+            if not lp:
                 ui.notify("Set the limit price first.", type="warning")
                 return
             ltp = engine.row_live_ltp(name, r)
             if ltp is None:
                 ltp = await engine.quote_option(name, r["strike"], r["opt"])
-            if not limit_sanity_ok(r["entry_price"], ltp, checked):
+            if not limit_sanity_ok(lp, ltp, checked):
                 return
         await checked()
     return place
@@ -1282,8 +1350,9 @@ def same_strike_page():
                     leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
                 price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
                 tf = tf_radio()
+                omode = order_mode_toggle()
 
-                def add(name=name, step=step, strike=strike, leg=leg, price=price, tf=tf):
+                def add(name=name, step=step, strike=strike, leg=leg, price=price, tf=tf, omode=omode):
                     try:
                         k, p = int(strike.value), float(price.value)
                     except (TypeError, ValueError):
@@ -1292,8 +1361,10 @@ def same_strike_page():
                     if k <= 0 or k % step or p <= 0:
                         ui.notify(f"Strike must be a multiple of {step}; common price above 0.", type="negative")
                         return
-                    engine.add_watch(name, k, leg.value, p, int(tf.value))
-                    ui.notify(f"Watching {k} {leg.value} at {p:g} ({tf.value} min).", type="positive")
+                    lim = omode.value == "limit"
+                    engine.add_watch(name, k, leg.value, p, int(tf.value), "limit" if lim else None)
+                    ui.notify(f"Watching {k} {leg.value} at {p:g} ({tf.value} min), "
+                              + (f"LIMIT order at {p:g}." if lim else "strategy order."), type="positive")
                 ui.button("Add", icon="add", on_click=add)
 
         def draw(place, live, compact, name=name):
@@ -1322,9 +1393,10 @@ def pair_page():
                 p_buffer = ui.number("Buffer (opponent below price − buffer)", value=1, min=0, step=0.05) \
                     .classes("w-64")
                 tf = tf_radio()
+                omode = order_mode_toggle()
 
                 def add(name=name, step=step, p_ce=p_ce, p_pe=p_pe, p_price=p_price, p_pe_price=p_pe_price,
-                        p_buffer=p_buffer, tf=tf):
+                        p_buffer=p_buffer, tf=tf, omode=omode):
                     try:
                         ce, pe, price = int(p_ce.value), int(p_pe.value), float(p_price.value)
                         pe_price = float(p_pe_price.value) if p_pe_price.value else price
@@ -1336,8 +1408,10 @@ def pair_page():
                         ui.notify(f"Strikes must be multiples of {step}; prices above 0; buffer 0 or more.",
                                   type="negative")
                         return
-                    engine.add_pair(name, ce, pe, price, pe_price, buffer, int(tf.value))
-                    ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}.", type="positive")
+                    lim = omode.value == "limit"
+                    engine.add_pair(name, ce, pe, price, pe_price, buffer, int(tf.value), "limit" if lim else None)
+                    ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}, "
+                              + ("LIMIT order at the fired leg's price." if lim else "strategy order."), type="positive")
                 ui.button("Add", icon="add", on_click=add)
 
         def draw(place, live, compact, name=name):

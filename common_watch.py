@@ -85,7 +85,7 @@ class CommonWatch:
             self.load(now)
 
     # ------------------------------------------------------------------ rows
-    def add(self, strike: int, leg: str, price: float, tf: int, now=None) -> list:
+    def add(self, strike: int, leg: str, price: float, tf: int, now=None, mode: str = None) -> list:
         now = now or datetime.now(IST)
         self._roll_day(now)
         added = []
@@ -95,6 +95,7 @@ class CommonWatch:
                    "tf": int(tf), "added_at": now.isoformat(), "status": "watching", "baseline": None,
                    "last_done": None, "prev_close": None, "last_close": None, "last_time": "",
                    "trig_time": "", "trig_close": None, "fail_time": "", "fail_close": None, "order_status": ""}
+            self._apply_mode(row, mode)
             self.rows.append(row)
             added.append(row)
         self.save()
@@ -150,7 +151,7 @@ class CommonWatch:
         return changed
 
     def add_pair(self, ce_strike: int, pe_strike: int, ce_price: float, pe_price: float, buffer: float, tf: int,
-                 now=None) -> dict:
+                 now=None, mode: str = None) -> dict:
         now = now or datetime.now(IST)
         self._roll_day(now)
         self._seq += 1
@@ -163,9 +164,28 @@ class CommonWatch:
                "opt": "", "strike": None, "price": None, "trig_time": "", "trig_close": None,
                "last_close": None, "last_time": "", "fail_time": "", "fail_close": None,
                "opp_close": None, "exit_close": None, "order_status": "", "order_id": None, "squareoff": ""}
+        self._apply_mode(row, mode)
         self.rows.append(row)
         self.save()
         return row
+
+    @staticmethod
+    def _apply_mode(r, mode):
+        """Order type of a card: "limit" = AlgoDelta limit_order at the card's Entry Price (pre-filled with the
+        row's level; a Pair before it fires uses the fired leg's price), SL / Target watched by the app.
+        None = strategy_order (market, or the app-side PENDING entry when an Entry Price is set)."""
+        r["entry_mode"] = "limit" if mode == "limit" else None
+        r["entry_price"] = round(float(r["price"]), 2) if mode == "limit" and r.get("price") else None
+        r["entry_dir"] = None
+
+    def set_mode(self, row_id: int, mode) -> bool:
+        """Switches a card between Strategy and Limit (resets its Entry Price). Locked once ordered / pending."""
+        r = self.get(row_id)
+        if not r or r.get("source") == "manual" or r.get("order_status") in ("SENT", "DRY RUN", "sending", "PENDING"):
+            return False
+        self._apply_mode(r, mode)
+        self.save()
+        return True
 
     def pop_exits(self) -> list:
         out, self._exits = getattr(self, "_exits", []), []
@@ -211,6 +231,8 @@ class CommonWatch:
         r = self.get(row_id)
         if not r or r["status"] != "watching" or r.get("source") == "star" or r.get("order_status"):
             return False
+        follow = r.get("entry_mode") == "limit" and r.get("entry_price") is not None \
+            and r.get("price") is not None and abs(r["entry_price"] - r["price"]) < 1e-9
         r.update(tf=int(tf), baseline=None)
         if r.get("kind") == "pair":
             r.update(ce_price=float(price), pe_price=float(pe_price if pe_price is not None else price),
@@ -218,6 +240,8 @@ class CommonWatch:
             r["legs"] = {o: {"prev_close": None, "last_close": None, "last_done": None} for o in ("CE", "PE")}
         else:
             r.update(price=float(price), last_done=None, prev_close=None)
+            if follow:                                  # a limit price that was the level follows the new level
+                r["entry_price"] = round(float(price), 2)
         self.save()
         return True
 
