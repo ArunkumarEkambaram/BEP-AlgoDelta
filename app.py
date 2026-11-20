@@ -1276,13 +1276,15 @@ def order_card(name, r, place, live):
             entry_lbl.set_text(_num_text(entry) if o else "--")
         msg_lbl.set_text(f"Limit {mo['price']:.2f}: {mo.get('msg', '')}" if mo else "")
         pnl = trade_tracker._f(o.get("pnl")) if o else None
-        pnl_lbl.set_text(f"{pnl:,.2f}" if pnl is not None else ("0" if o else "--"))
-        pnl_lbl.classes(remove="text-green-5 text-red-5")
-        if pnl is not None:
-            pnl_lbl.classes(add="text-green-5" if pnl >= 0 else "text-red-5")
         pts = trade_tracker._f(o.get("points")) if o else None
+        live = engine.open_pnl(o) if pnl is None else None   # open position: (LTP - Entry) x qty, every 2 s
+        shown = pnl if pnl is not None else (live[1] if live else None)
+        pnl_lbl.set_text(f"{shown:,.2f}" if shown is not None else ("0" if o else "--"))
+        pnl_lbl.classes(remove="text-green-5 text-red-5")
+        if shown is not None:
+            pnl_lbl.classes(add="text-green-5" if shown >= 0 else "text-red-5")
         pts_lbl.set_text(f"{pts:+.2f} pts (exited {_num_text(o.get('exit'))})" if pts is not None else
-                         (f"LTP {o.get('ltp_live')}" if o and o.get("ltp_live") not in (None, "") else ""))
+                         (f"{live[0]:+.2f} pts \u00b7 open" if live else ""))
         st = card_state(r, o)
         chip.set_text(st)
         chip.props(f"color={_chip_colour(st)}")
@@ -1672,7 +1674,7 @@ def orders_page():
             </q-td>''')
         for col in ("points", "pnl"):
             table.add_slot(f"body-cell-{col}", f'''
-            <q-td key="{col}" :props="props" :class="typeof props.value === 'number' ? (props.value >= 0 ? 'text-green-6 text-weight-bold' : 'text-red-6 text-weight-bold') : ''">{{{{ props.value }}}}</q-td>''')
+            <q-td key="{col}" :props="props" :class="typeof props.value === 'number' ? (props.value >= 0 ? 'text-green-6 text-weight-bold' : 'text-red-6 text-weight-bold') : (typeof props.row.open_{col} === 'number' ? (props.row.open_{col} >= 0 ? 'text-green-6' : 'text-red-6') : '')">{{{{ typeof props.value === 'number' ? props.value : (typeof props.row.open_{col} === 'number' ? props.row.open_{col} + ' (open)' : props.value) }}}}</q-td>''')
         table.add_slot("body-cell-detail", '''
             <q-td key="detail" :props="props" style="max-width: 260px; white-space: normal; word-break: break-word">{{ props.value }}</q-td>''')
     ui.label("LIVE (SENT) orders: Entry / Exit are the real fills from today's Upstox trade book (refreshed every "
@@ -1758,11 +1760,15 @@ def orders_page():
             r["sq_action"] = "Retry square off" if sq.startswith("FAILED") and trade_tracker._f(r.get("exit")) is None \
                 else ("Square off" if engine.is_open(r) else "")
             r["sq_text"] = f"Squared off {sq}" if sq else ""
+        for r in engine.order_log:                    # open positions: (LTP - Entry) x qty, worked out locally
+            live = engine.open_pnl(r)
+            r["open_points"], r["open_pnl"] = (live if live else (None, None))
         table.rows = list(reversed(engine.order_log))
         table.update()
         s = engine.pnl_summary()
         summary.set_text(f"{s['orders']} orders · {s['closed']} closed · {s['wins']} won · "
-                         f"points {s['points']:+.2f} · P&L ₹{s['pnl']:,.2f}")
+                         f"points {s['points']:+.2f} · P&L ₹{s['pnl']:,.2f}"
+                         + (f" · open {s['open']}: P&L ₹{s['open_pnl']:,.2f}" if s["open"] else ""))
     when_changed(["orders"], render)
 
 

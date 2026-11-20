@@ -185,10 +185,29 @@ class Engine:
         self._save_order_row(row)
         self.bump("orders")
 
+    def open_pnl(self, o):
+        """(points, P&L) of a still-open position, worked out locally: (live LTP - Entry) x quantity.
+        LTP = the 2 s batch (no extra API call); quantity = the filled units (live) or lots x lot size.
+        None when closed or Entry / LTP unknown."""
+        if not o or not self.is_open(o):
+            return None
+        entry = trade_tracker._f(o.get("entry"))
+        ltp = self.option_ltp.get(self._opt_key(o))
+        if ltp is None:
+            ltp = trade_tracker._f(o.get("ltp_live"))
+        if entry is None or ltp is None:
+            return None
+        units = trade_tracker._f(o.get("filled_qty")) or \
+            (trade_tracker._f(o.get("qty")) or 1) * config.INDEXES.get(o.get("index"), {}).get("lot_size", 1)
+        pts = round(ltp - entry, 2)
+        return pts, round(pts * units, 2)
+
     def pnl_summary(self) -> dict:
         pts = [r["points"] for r in self.order_log if isinstance(r.get("points"), (int, float))]
         pnl = [r["pnl"] for r in self.order_log if isinstance(r.get("pnl"), (int, float))]
+        opens = [x for x in (self.open_pnl(r) for r in self.order_log) if x]
         return {"orders": len(self.order_log), "closed": len(pts), "points": round(sum(pts), 2),
+                "open": len(opens), "open_pnl": round(sum(x[1] for x in opens), 2),
                 "pnl": round(sum(pnl), 2), "wins": sum(1 for p in pts if p > 0)}
 
     # ------------------------------------------------------------------ actions from the pages
@@ -403,8 +422,7 @@ class Engine:
                     wanted.add((name, int(r["strike"]), r["opt"]))
         for o in self.order_log:                     # limit orders / app trails keep their live LTP without a card
             m = limit_orders.parse(o.get("mg"))
-            if o.get("index") in self.monitors and ((m and limit_orders.pending(m)) or
-                                                    ((m or o.get("c_trail")) and self.is_open(o))):
+            if o.get("index") in self.monitors and ((m and limit_orders.pending(m)) or self.is_open(o)):
                 wanted.add((o["index"], int(float(o["strike"])), o["opt"]))
         if not wanted:
             return
@@ -428,6 +446,14 @@ class Engine:
                 w = keys.get(ik) or keys.get(ik.replace(":", "|"))
                 if w:
                     self.option_ltp[w] = round(float(v), 2)
+            moved = False                            # Order Details: open orders follow the same 2 s LTP
+            for o in self.order_log:
+                v = self.option_ltp.get(self._opt_key(o))
+                if v is not None and self.is_open(o) and o.get("ltp_live") != v:
+                    o["ltp_live"] = v
+                    moved = True
+            if moved:
+                self.bump("orders")
         except Exception as ex:
             self.log(f"Order Management LTP error: {ex}")
         finally:
@@ -838,7 +864,8 @@ class Engine:
                 self.log(f"Upstox trade book unavailable ({t_err}); Entry/Exit not updated.")
         expiries = {n: self.monitors[n].expiry for n in self.monitors}
         try:
-            updates, _err = await run.io_bound(trade_tracker.compute, self.client, self.order_log, expiries, trades)
+            updates, _err = await run.io_bound(trade_tracker.compute, self.client, self.order_log, expiries, trades,
+                                               None, dict(self.option_ltp))
         except Exception as ex:
             self.log(f"Order tracking error: {ex}")
             return

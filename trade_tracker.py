@@ -67,10 +67,18 @@ def entry_time(r) -> str:
     return (m.get("fill_time") if m else None) or r.get("time", "")
 
 
-def compute(client, rows, expiry_by_index, trades=None, now=None):
+def _opt_key(r):
+    try:
+        return r.get("index"), int(float(r.get("strike"))), r.get("opt")
+    except (TypeError, ValueError):
+        return None
+
+
+def compute(client, rows, expiry_by_index, trades=None, now=None, known=None):
     """
     Works out the live columns for every tracked row. Returns ({row_id: fields}, error_or_None).
     `trades` is today's Upstox trade list (None = not fetched this time; SENT rows then keep their fills).
+    `known` = {(index, strike, opt): LTP} the engine already fetched (2 s batch); only the rest is fetched here.
     Runs on a worker thread: it only reads `rows` (plus caching "ik") and returns the new values.
     """
     tracked = [r for r in rows if r.get("status") in TRACKED]
@@ -83,7 +91,10 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
         if ik:
             iks[r["id"]] = ik
 
-    ltp_map, err = client.fetch_ltp(sorted(set(iks.values()))) if iks else ({}, None)
+    known = known or {}
+    missing = sorted({ik for rid, ik in iks.items()
+                      if known.get(_opt_key(next(r for r in tracked if r["id"] == rid))) is None})
+    ltp_map, err = client.fetch_ltp(missing) if missing else ({}, None)
     ltp_map = ltp_map or {}
 
     fills = {}
@@ -107,7 +118,9 @@ def compute(client, rows, expiry_by_index, trades=None, now=None):
     out = {}
     for r in tracked:
         ik = iks.get(r["id"])
-        ltp = ltp_map.get(ik) if ik else None
+        ltp = known.get(_opt_key(r))
+        if ltp is None and ik:
+            ltp = ltp_map.get(ik)
         if ltp is None and ik:                        # key may come back as NSE_FO:xxx instead of NSE_FO|xxx
             ltp = ltp_map.get(ik.replace("|", ":"))
         fields = {"ltp_live": round(ltp, 2) if ltp is not None else _keep(r, "ltp_live")}
