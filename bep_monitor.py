@@ -54,9 +54,7 @@ class BepMonitor:
         self.new_orders = []         # signals waiting to be sent
 
     def _reset_leg_state(self, strike, opt):
-        self.leg_states[(strike, opt)] = {
-            "state": "idle", "flush_low": None, "active_row_id": None
-        }
+        self.leg_states[(strike, opt)] = support_logic.new_leg_state()
 
     def reset_backfill(self):
         self.buckets.clear()
