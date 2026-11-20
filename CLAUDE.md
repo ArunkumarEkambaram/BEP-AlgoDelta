@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #26; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #27; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -156,6 +156,17 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - The Compact view Level column uses the same names; Manual rows show their order type.
    - **SL after placing (discussed, left as is by the user):** an app rule set after ⚡ only **adds** an exit, because AlgoDelta's original SL (e.g. 12 POINT) stays active with no modify syntax. To use only a CANDLE SL, set it **before** ⚡. Offered but not built: show both SLs on ordered cards, warn in the popup, and a Setup "SL held by AlgoDelta / App" switch.
 
+20. **Arming on a touch, Trigger on Live LTP, 1 min (PR #27; Same strike and Pair):**
+   - **Why:** the user's Pair (25500CE/25750PE @ 196) never fired. The CE was already above 196 when added and never **closed** back at or below it within 5 min.
+   - **Armed:** a leg is armed once it trades at or below its price after the row is added: a candle close, a candle **low** (wick) of a candle that started after the add, or the **live LTP** (every 2 s, `CommonWatch.live_step` via `engine.check_live_watch`). Same strike rows now have `armed` too. Cards and Compact status show "armed / not armed yet".
+   - **Trigger on** (per row `trig_on`; toggle on both forms and in Edit, default **Candle close**):
+     - **Candle close:** an armed leg's candle closes above the price (Pair: the opponent's close below price − buffer).
+     - **Live LTP:** an armed leg's LTP goes above the price (Pair: the opponent's LTP below price − buffer), within ~2 s (`trig_how` = "ltp", `trig_time` HH:MM:SS).
+   - FAILED and the Pair opponent exit stay on candle closes.
+   - **Timeframes:** 1 / 3 / 5 min (forms and Edit). Editing a row restarts arming.
+   - Nothing is placed automatically: a trigger means alert + TRIGGERED, then ⚡.
+   - "Arm now" (count a leg already above as armed) was declined.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -180,7 +191,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #26: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #27: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**

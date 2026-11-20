@@ -11,6 +11,15 @@ def support_label(e: dict) -> str:
 
 
 def common_label(r: dict) -> str:
+    if r.get("trig_how") == "ltp":                    # Trigger on live LTP
+        if r.get("kind") == "pair":
+            opp = "PE" if r["opt"] == "CE" else "CE"
+            line = (r["pe_price"] if r["opt"] == "CE" else r["ce_price"]) - r["buffer"]
+            return (f"{r['index']} PAIR {r['ce_strike']}CE/{r['pe_strike']}PE: {r['strike']}{r['opt']} LTP above "
+                    f"{r['price']:g} (LTP {r['trig_close']:.2f} at {r['trig_time']}) with {opp} LTP below {line:g}. "
+                    "Use Place order to trade.")
+        return (f"{r['index']} {r['strike']}{r['opt']} LTP above common price {r['price']:g}: "
+                f"LTP {r['trig_close']:.2f} at {r['trig_time']}. Use Place order to trade.")
     if r.get("kind") == "pair":
         opp = "PE" if r["opt"] == "CE" else "CE"
         line = (r["pe_price"] if r["opt"] == "CE" else r["ce_price"]) - r["buffer"]

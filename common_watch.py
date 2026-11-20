@@ -21,6 +21,13 @@ closes below its price - buffer. The leg must have closed at or below its price 
     AlgoDelta's squareoff_position (live) or records the exit at the bought leg's close (dry run).
 The normal Target / SL / trailing SL still apply as well (AlgoDelta live, simulated in dry run).
 
+ARMING / TRIGGER (PR #27, both Same strike and Pair): a leg is ARMED once it trades at or below its price after
+the row was added - a candle close or a candle LOW (wick) of a candle that started after the add, or the live LTP
+(every 2 s, engine.check_live_watch -> live_step). Trigger on (per row, "trig_on"):
+  - "close" (default): an armed leg's candle CLOSES above its price (Pair: the opponent's close below price - buffer).
+  - "ltp": an armed leg's live LTP goes above its price (Pair: the opponent's LTP below price - buffer), within ~2 s.
+FAILED / the Pair opponent exit stay on candle closes. Timeframes 1 / 3 / 5 min.
+
 \u2b50 rows (source "star") are added automatically for a LIVE first-support-of-the-day (\u2b50) on the BEP Support
 board, within that candle's ATM window. They are TRIGGERED at once (Place order ready, no extra alert - the board
 already alerts) and turn FAILED when the board's support row turns red. Their candles are not re-checked here.
@@ -85,7 +92,8 @@ class CommonWatch:
             self.load(now)
 
     # ------------------------------------------------------------------ rows
-    def add(self, strike: int, leg: str, price: float, tf: int, now=None, mode: str = None) -> list:
+    def add(self, strike: int, leg: str, price: float, tf: int, now=None, mode: str = None,
+            trig_on: str = "close") -> list:
         now = now or datetime.now(IST)
         self._roll_day(now)
         added = []
@@ -94,7 +102,8 @@ class CommonWatch:
             row = {"id": self._seq, "index": self.index, "strike": int(strike), "opt": opt, "price": float(price),
                    "tf": int(tf), "added_at": now.isoformat(), "status": "watching", "baseline": None,
                    "last_done": None, "prev_close": None, "last_close": None, "last_time": "",
-                   "trig_time": "", "trig_close": None, "fail_time": "", "fail_close": None, "order_status": ""}
+                   "trig_time": "", "trig_close": None, "fail_time": "", "fail_close": None, "order_status": "",
+                   "armed": False, "trig_on": "ltp" if trig_on == "ltp" else "close"}
             self._apply_mode(row, mode)
             self.rows.append(row)
             added.append(row)
@@ -151,7 +160,7 @@ class CommonWatch:
         return changed
 
     def add_pair(self, ce_strike: int, pe_strike: int, ce_price: float, pe_price: float, buffer: float, tf: int,
-                 now=None, mode: str = None) -> dict:
+                 now=None, mode: str = None, trig_on: str = "close") -> dict:
         now = now or datetime.now(IST)
         self._roll_day(now)
         self._seq += 1
@@ -163,7 +172,8 @@ class CommonWatch:
                # filled when a side triggers (so the shared Place order / alert code can use them)
                "opt": "", "strike": None, "price": None, "trig_time": "", "trig_close": None,
                "last_close": None, "last_time": "", "fail_time": "", "fail_close": None,
-               "opp_close": None, "exit_close": None, "order_status": "", "order_id": None, "squareoff": ""}
+               "opp_close": None, "exit_close": None, "order_status": "", "order_id": None, "squareoff": "",
+               "trig_on": "ltp" if trig_on == "ltp" else "close"}
         self._apply_mode(row, mode)
         self.rows.append(row)
         self.save()
@@ -225,7 +235,8 @@ class CommonWatch:
         self.save()
         return True
 
-    def edit(self, row_id: int, tf: int, price: float = None, pe_price: float = None, buffer: float = None) -> bool:
+    def edit(self, row_id: int, tf: int, price: float = None, pe_price: float = None, buffer: float = None,
+             trig_on: str = None) -> bool:
         """Changes a WAITING row's level / timeframe (pair: CE price, PE price, buffer) and restarts its check from
         the candles before it was added (same baseline rule as a new row). Not for \u2b50 rows."""
         r = self.get(row_id)
@@ -233,7 +244,9 @@ class CommonWatch:
             return False
         follow = r.get("entry_mode") == "limit" and r.get("entry_price") is not None \
             and r.get("price") is not None and abs(r["entry_price"] - r["price"]) < 1e-9
-        r.update(tf=int(tf), baseline=None)
+        r.update(tf=int(tf), baseline=None, armed=False)
+        if trig_on in ("close", "ltp"):
+            r["trig_on"] = trig_on
         if r.get("kind") == "pair":
             r.update(ce_price=float(price), pe_price=float(pe_price if pe_price is not None else price),
                      buffer=float(buffer if buffer is not None else r["buffer"]))
@@ -298,7 +311,11 @@ class CommonWatch:
                 prev = r["prev_close"]
                 if prev is None:                  # no candle before the row (added pre-open): use this candle's open
                     prev = float(c[1])
-                if r["status"] == "watching" and prev is not None and prev <= r["price"] < close:
+                if prev is not None and prev <= r["price"]:
+                    r["armed"] = True             # at or below the price since the row was added
+                if _ts(c) >= added_at and float(c[3]) <= r["price"]:
+                    r["armed"] = True             # a wick to the price counts too (candle started after the add)
+                if r["status"] == "watching" and r.get("armed") and close > r["price"]:
                     r.update(status="triggered", trig_time=label, trig_close=close)
                     triggered.append(dict(r))
                 elif r["status"] == "triggered" and close < r["price"]:
@@ -324,11 +341,12 @@ class CommonWatch:
         iks = {"CE": mapping.get(r["ce_strike"], {}).get("CE"), "PE": mapping.get(r["pe_strike"], {}).get("PE")}
         if not all(iks.values()):
             return [], False
-        closes, opens = {}, {}
+        closes, opens, lows = {}, {}, {}
         for opt, ik in iks.items():
             candles, _err = client.fetch_intraday_candles(ik, r["tf"])
             closes[opt] = {c[0]: float(c[4]) for c in (candles or []) if _ts(c) + tf <= ref}
             opens[opt] = {c[0]: float(c[1]) for c in (candles or []) if _ts(c) + tf <= ref}
+            lows[opt] = {c[0]: float(c[3]) for c in (candles or []) if _ts(c) + tf <= ref}
         times = sorted(set(closes["CE"]) & set(closes["PE"]), key=lambda t: datetime.fromisoformat(t))
         if not times:
             return [], False
@@ -355,6 +373,8 @@ class CommonWatch:
                         prev = opens[o].get(t)
                     if prev is not None and prev <= price[o]:
                         r["legs"][o]["armed"] = True          # has been at or below its price since the row was added
+                    if datetime.fromisoformat(t) >= added_at and lows[o].get(t, close) <= price[o]:
+                        r["legs"][o]["armed"] = True          # a wick to the price counts too
                     if r["legs"][o].get("armed") and close > price[o] and closes[opp][t] < line[opp]:
                         strike = r["ce_strike"] if o == "CE" else r["pe_strike"]
                         r.update(status="triggered", opt=o, strike=strike, price=price[o], trig_time=label,
@@ -378,6 +398,56 @@ class CommonWatch:
                 break
         return fired, changed
 
+    def live_step(self, ltp_of, now) -> tuple:
+        """Every OPTION_LTP_SECONDS (engine): arms legs whose live LTP is at or below their price, and triggers
+        rows set to Trigger on "ltp". ltp_of(strike, opt) -> live LTP or None. Returns (fired copies, changed)."""
+        self._roll_day(now)
+        fired, changed = [], False
+        label = now.strftime("%H:%M:%S")
+        for r in self.rows:
+            if r["status"] != "watching" or r.get("source") in ("star", "manual"):
+                continue
+            if r.get("kind") == "pair":
+                price = {"CE": r["ce_price"], "PE": r["pe_price"]}
+                lt = {"CE": ltp_of(r["ce_strike"], "CE"), "PE": ltp_of(r["pe_strike"], "PE")}
+                for o in ("CE", "PE"):
+                    if lt[o] is not None and lt[o] <= price[o] and not r["legs"][o].get("armed"):
+                        r["legs"][o]["armed"] = True
+                        changed = True
+                if r.get("trig_on") != "ltp" or None in lt.values():
+                    continue
+                for o, opp in (("CE", "PE"), ("PE", "CE")):
+                    if r["legs"][o].get("armed") and lt[o] > price[o] and lt[opp] < price[opp] - r["buffer"]:
+                        strike = r["ce_strike"] if o == "CE" else r["pe_strike"]
+                        r.update(status="triggered", opt=o, strike=strike, price=price[o], trig_time=label,
+                                 trig_close=lt[o], last_close=lt[o], last_time=label, trig_how="ltp", trig_opp=lt[opp])
+                        fired.append(dict(r))
+                        changed = True
+                        break
+            else:
+                v = ltp_of(r["strike"], r["opt"])
+                if v is None:
+                    continue
+                if v <= r["price"] and not r.get("armed"):
+                    r["armed"] = True
+                    changed = True
+                if r.get("trig_on") == "ltp" and r.get("armed") and v > r["price"]:
+                    r.update(status="triggered", trig_time=label, trig_close=v, last_close=v, last_time=label,
+                             trig_how="ltp")
+                    fired.append(dict(r))
+                    changed = True
+        if changed:
+            self.save()
+        return fired, changed
+
+    @staticmethod
+    def armed_text(r) -> str:
+        """e.g. "armed" / "CE armed" / "not armed yet" for a WAITING row."""
+        if r.get("kind") == "pair":
+            legs = [o for o in ("CE", "PE") if r["legs"][o].get("armed")]
+            return (" + ".join(legs) + " armed") if legs else "not armed yet (no leg at or below its price)"
+        return "armed" if r.get("armed") else "not armed yet (not at or below the price)"
+
     @staticmethod
     def pair_title(r) -> str:
         pe = "" if r["pe_price"] == r["ce_price"] else f" (PE @ {r['pe_price']:g})"
@@ -397,8 +467,9 @@ class CommonWatch:
         if r.get("kind") == "pair":
             opp = "PE" if r.get("opt") == "CE" else "CE"
             if r["status"] == "watching":
-                return "Watching both legs"
-            text = f"{r['opt']} closed above at {r['trig_time']}, close {r['trig_close']:.2f}"
+                return "Watching both legs \u00b7 " + CommonWatch.armed_text(r)
+            text = (f"{r['opt']} LTP above at {r['trig_time']}, LTP {r['trig_close']:.2f}" if r.get("trig_how") == "ltp"
+                    else f"{r['opt']} closed above at {r['trig_time']}, close {r['trig_close']:.2f}")
             if r["status"] == "failed":
                 text += f" \u2192 failed: {opp} closed {r['fail_close']:.2f} at {r['fail_time']}"
             elif r["status"] == "exited":
@@ -416,8 +487,9 @@ class CommonWatch:
                 text += f" \u2192 failed at {r['fail_time']}" + (f", close {fc:.2f}" if fc is not None else "")
             return text
         if r["status"] == "triggered":
-            return f"Triggered at {r['trig_time']}, close {r['trig_close']:.2f}"
+            return f"Triggered at {r['trig_time']}, " + ("LTP" if r.get("trig_how") == "ltp" else "close") \
+                + f" {r['trig_close']:.2f}"
         if r["status"] == "failed":
             return (f"Triggered at {r['trig_time']}, close {r['trig_close']:.2f} → "
                     f"failed at {r['fail_time']}, close {r['fail_close']:.2f}")
-        return "Watching"
+        return "Watching \u00b7 " + CommonWatch.armed_text(r)

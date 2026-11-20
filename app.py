@@ -507,7 +507,7 @@ def section(title, icon, rows, empty_text, place, name):
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
             src = f"\u2b50 {r['trig_time']}" if r.get("source") == "star" else "Manual"
             level = manual_type(r) if r.get("source") == "manual" else f"{r['price']:g}"
-            cells = [src, str(r["strike"]), r["opt"], level, f"{r['tf']} min",
+            cells = [src, str(r["strike"]), r["opt"], level, f"{r['tf']} min" + (" · LTP" if r.get("trig_on") == "ltp" else ""),
                      (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
                      CommonWatch.status_text(r)]
             for txt in cells:
@@ -609,7 +609,8 @@ def pair_section(rows, place, name):
                   "exited": "bg-red-10 text-red-2"}.get(r["status"], "")
             lc = r["legs"]["CE"].get("last_close"), r["legs"]["PE"].get("last_close")
             closes = " \u00b7 ".join(f"{v:.2f}" if v is not None else "--" for v in lc)
-            for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}", f"{r['tf']} min", closes, CommonWatch.status_text(r)):
+            for txt in (CommonWatch.pair_title(r), f"{r['buffer']:g}",
+                        f"{r['tf']} min" + (" · LTP" if r.get("trig_on") == "ltp" else ""), closes, CommonWatch.status_text(r)):
                 ui.label(txt).classes(f"text-sm px-2 py-1 rounded {bg}")
             order_type_cell(name, r)
             sl_tgt_cell(name, r)
@@ -915,8 +916,10 @@ def edit_dialog(name, r):
         buffer = ui.number("Buffer", value=r.get("buffer"), min=0, step=0.05).classes("w-full")
         pe_price.set_visibility(pair)
         buffer.set_visibility(pair)
-        tf = ui.radio({3: "3 min", 5: "5 min"}, value=r["tf"]).props("inline dense")
-        ui.label("Saving restarts the check from the candles before the row was added.").classes("text-xs opacity-70")
+        tf = ui.radio({1: "1 min", 3: "3 min", 5: "5 min"}, value=r["tf"]).props("inline dense")
+        trig = trig_toggle(r.get("trig_on") or "close")
+        ui.label("Saving restarts the check from the candles before the row was added (arming starts again)."
+                 ).classes("text-xs opacity-70")
 
         def save():
             try:
@@ -929,7 +932,7 @@ def edit_dialog(name, r):
             if p <= 0 or pp <= 0 or (b is not None and b < 0):
                 ui.notify("Prices above 0; buffer 0 or more.", type="negative")
                 return
-            if engine.edit_watch(name, r["id"], int(tf.value), p, pp, b):
+            if engine.edit_watch(name, r["id"], int(tf.value), p, pp, b, trig.value):
                 dlg.close()
             else:
                 ui.notify("Only a WAITING row can be edited.", type="warning")
@@ -1242,7 +1245,7 @@ def order_card(name, r, place, live):
                             ui.label(f"{(r['ce_price'] if r.get('kind') == 'pair' else r['price']):.2f}") \
                                 .classes("text-lg font-bold")
                         ui.icon("arrow_upward").classes("text-sm")
-                    ui.label(f"close above · {r['tf']} min"
+                    ui.label(("LTP above (live)" if r.get("trig_on") == "ltp" else "close above") + f" · {r['tf']} min"
                              + (f" · buffer {r['buffer']:g}" if r.get("kind") == "pair" else "")).classes("text-xs opacity-60")
             card_rule_box(name, r, "tgt", locked)
             card_rule_box(name, r, "sl", locked)
@@ -1396,7 +1399,21 @@ def om_list(name, title, icon, draw):
 def tf_radio():
     with ui.column().classes("gap-0"):
         ui.label("Timeframe").classes("text-xs opacity-70")
-        return ui.radio({3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+        return ui.radio({1: "1 min", 3: "3 min", 5: "5 min"}, value=5).props("inline dense")
+
+
+TRIG_ON = {"close": "Candle close", "ltp": "Live LTP"}
+
+
+def trig_toggle(value="close"):
+    """Trigger on: Candle close (default) or Live LTP (within ~2 s of crossing the price)."""
+    with ui.column().classes("gap-0"):
+        ui.label("Trigger on").classes("text-xs opacity-70")
+        t = ui.toggle(TRIG_ON, value=value).props("dense no-caps")
+        t.tooltip("Candle close: an armed leg's candle closes above the price. Live LTP: its LTP goes above the "
+                  "price (Pair: the opponent's LTP below price - buffer). A leg is armed once it trades at or "
+                  "below its price after the row is added.")
+        return t
 
 
 def centre_strike(name):
@@ -1419,9 +1436,10 @@ def same_strike_page():
                     leg = ui.radio(["Both", "CE", "PE"], value="Both").props("inline dense")
                 price = ui.number("Common price", value=None, min=0, step=0.05).classes("w-36")
                 tf = tf_radio()
+                trig = trig_toggle()
                 omode = order_mode_toggle()
 
-                def add(name=name, step=step, strike=strike, leg=leg, price=price, tf=tf, omode=omode):
+                def add(name=name, step=step, strike=strike, leg=leg, price=price, tf=tf, omode=omode, trig=trig):
                     try:
                         k, p = int(strike.value), float(price.value)
                     except (TypeError, ValueError):
@@ -1431,7 +1449,7 @@ def same_strike_page():
                         ui.notify(f"Strike must be a multiple of {step}; common price above 0.", type="negative")
                         return
                     lim = omode.value == "limit"
-                    engine.add_watch(name, k, leg.value, p, int(tf.value), "limit" if lim else None)
+                    engine.add_watch(name, k, leg.value, p, int(tf.value), "limit" if lim else None, trig.value)
                     ui.notify(f"Watching {k} {leg.value} at {p:g} ({tf.value} min), "
                               + (f"LIMIT order at {p:g}." if lim else "strategy order."), type="positive")
                 ui.button("Add", icon="add", on_click=add)
@@ -1462,10 +1480,11 @@ def pair_page():
                 p_buffer = ui.number("Buffer (opponent below price − buffer)", value=1, min=0, step=0.05) \
                     .classes("w-64")
                 tf = tf_radio()
+                trig = trig_toggle()
                 omode = order_mode_toggle()
 
                 def add(name=name, step=step, p_ce=p_ce, p_pe=p_pe, p_price=p_price, p_pe_price=p_pe_price,
-                        p_buffer=p_buffer, tf=tf, omode=omode):
+                        p_buffer=p_buffer, tf=tf, omode=omode, trig=trig):
                     try:
                         ce, pe, price = int(p_ce.value), int(p_pe.value), float(p_price.value)
                         pe_price = float(p_pe_price.value) if p_pe_price.value else price
@@ -1478,7 +1497,8 @@ def pair_page():
                                   type="negative")
                         return
                     lim = omode.value == "limit"
-                    engine.add_pair(name, ce, pe, price, pe_price, buffer, int(tf.value), "limit" if lim else None)
+                    engine.add_pair(name, ce, pe, price, pe_price, buffer, int(tf.value), "limit" if lim else None,
+                                    trig.value)
                     ui.notify(f"Watching pair {ce}CE / {pe}PE at {price:g}, "
                               + ("LIMIT order at the fired leg's price." if lim else "strategy order."), type="positive")
                 ui.button("Add", icon="add", on_click=add)
