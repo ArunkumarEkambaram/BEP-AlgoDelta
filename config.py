@@ -61,6 +61,10 @@ SUPPORT_SCAN_ALL_CSV_STRIKES = True
 # BEP Support failure window: 3 = 15 minutes.
 SUPPORT_FAIL_WINDOW_CANDLES = 3
 
+# BEP Support "Failed breakdown" setup: a validated setup can be used by a trigger only within this
+# many candles after the validate candle (3 = 15 minutes). 0 = no expiry.
+SUPPORT_SETUP_EXPIRY_CANDLES = 3
+
 # ---------------------------------------------------------------- ALGO DELTA ORDERS
 AUTO_ORDER_DRY_RUN = True         # "Dry run" checkbox. True = log the JSON only, send nothing.
 AUTO_ORDER_PAUSED = False         # "Pause algo trade" button.
