@@ -29,7 +29,7 @@ from common_watch import CommonWatch  # noqa: F401  (also used for pair titles)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "ltp", "status", "detail", "payload",
-                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq", "mg"]
+                      "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq", "mg", "c_trail"]
 ORDER_LOCKED = ("SENT", "DRY RUN", "sending")
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
 _LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
@@ -121,6 +121,7 @@ class Engine:
             r.setdefault("ltp_live", "")
             r.setdefault("sq", "")
             r.setdefault("mg", "")
+            r.setdefault("c_trail", "")
         return rows
 
     def _restore_side_locks(self):
@@ -178,6 +179,7 @@ class Engine:
             "entry": "--", "exit": "--", "ltp_live": "", "points": "--", "pnl": "--",
             "c_sl": (sig.get("app_rules") or {}).get("c_sl", ""), "c_tgt": (sig.get("app_rules") or {}).get("c_tgt", ""),
             "c_done": "", "sq": "", "mg": sig.get("mg", ""),
+            "c_trail": (sig.get("app_rules") or {}).get("c_trail", ""),
         }
         self.order_log.append(row)
         self._save_order_row(row)
@@ -397,9 +399,10 @@ class Engine:
                     wanted.update({(name, r["ce_strike"], "CE"), (name, r["pe_strike"], "PE")})
                 elif r.get("strike") is not None:
                     wanted.add((name, int(r["strike"]), r["opt"]))
-        for o in self.order_log:                     # limit orders keep their live LTP even if the card is deleted
+        for o in self.order_log:                     # limit orders / app trails keep their live LTP without a card
             m = limit_orders.parse(o.get("mg"))
-            if m and o.get("index") in self.monitors and (limit_orders.pending(m) or self.is_open(o)):
+            if o.get("index") in self.monitors and ((m and limit_orders.pending(m)) or
+                                                    ((m or o.get("c_trail")) and self.is_open(o))):
                 wanted.add((o["index"], int(float(o["strike"])), o["opt"]))
         if not wanted:
             return
@@ -573,6 +576,7 @@ class Engine:
         if self.connected and market_utils.is_market_open():
             await self.check_pending_entries()
             await self.check_limits()
+            await self.check_app_trails()
 
     async def place_watch_order(self, name, row_id, fill_ltp=None, entry_note=""):
         """Sends the card's order now (market). Signal LTP = the live LTP at the click / at the price hit (dry-run
@@ -607,6 +611,9 @@ class Engine:
                 app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
             else:                                     # LTP / POINT -> sent to AlgoDelta as this order's value
                 params[k], params[k + "_type"] = rule["value"], rule["type"]
+        sl_rule = exit_rules.parse(r.get("c_sl"))
+        if sl_rule and sl_rule["type"] == "CANDLE" and tr["on"]:   # AlgoDelta cannot trail (is_sl false): the app does
+            app_rules["c_trail"] = self._trail_json(tr)
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"],
                "bep": (r.get("entry_price") or ltp) if kind == "manual" else r["price"],
                "ltp": ltp,
@@ -1215,6 +1222,85 @@ class Engine:
             if dirty:
                 self._rewrite_orders_file()
                 self.bump("orders", "watch")
+
+    # ------------------------------------------------------------------ app-watched trailing SL (normal orders)
+    @staticmethod
+    def _trail_json(tr) -> str:
+        return json.dumps({"trigger": float(tr["trigger"]), "gap": float(tr["gap"]),
+                           "step": float(tr.get("point") or tr.get("step") or 1), "set_at": _stamp(), "high": None,
+                           "done": ""})
+
+    @staticmethod
+    def app_trail(o):
+        """The order's app-watched trailing SL (dict) or None. Limit orders keep theirs in mg instead."""
+        try:
+            t = json.loads(o.get("c_trail") or "null")
+        except (TypeError, ValueError):
+            return None
+        return t if isinstance(t, dict) and "trigger" in t else None
+
+    @staticmethod
+    def trail_level(t, entry):
+        """Current level of an app trailing SL: None until the high reaches entry + trigger."""
+        high = t.get("high")
+        if entry is None or high is None or high < entry + t["trigger"]:
+            return None
+        step = t.get("step") or 1
+        return round(entry + int((high - t["gap"] - entry) // step) * step, 2)
+
+    def set_order_trail(self, order_id, trail) -> bool:
+        """Adds / changes (trail with on=True) or removes an app-watched trailing SL on a placed order (not a limit
+        order, not the 09:15 order). It runs on the live LTP every 2 s; AlgoDelta's own trail (if sent) stays."""
+        o = next((x for x in self.order_log if x["id"] == order_id), None)
+        if not o or not self.order_rule_editable(o):
+            return False
+        o["c_trail"] = self._trail_json(trail) if trail and trail.get("on") else ""
+        self.log(f"{o['index']} {o['strike']}{o['opt']} order: app trailing SL " + (
+            f"set (trigger {trail['trigger']:g}, gap {trail['gap']:g}, point {trail.get('point', 1):g})"
+            if o["c_trail"] else "removed") + ".")
+        self._rewrite_orders_file()
+        self.bump("orders", "watch")
+        return True
+
+    async def check_app_trails(self):
+        """Every OPTION_LTP_SECONDS in market hours: app trailing SLs of open orders on the live LTP. Once the high
+        reaches entry + trigger, SL = high - gap (steps of point), never down; LTP at or below it -> square-off
+        (once). Entry = the order's Entry (Upstox fill live, signal LTP in dry run)."""
+        dirty = False
+        for o in list(self.order_log):
+            t = self.app_trail(o)
+            if not t or t.get("done") or o.get("mg") or not self.is_open(o):
+                continue
+            entry = trade_tracker._f(o.get("entry"))
+            ltp = self.option_ltp.get(self._opt_key(o))
+            if entry is None or ltp is None:
+                continue
+            if t.get("high") is None:
+                t["high"] = entry
+            level = self.trail_level(t, entry)
+            if level is not None and ltp <= level:
+                t["done"] = f"{_stamp()} at {level:g}"
+                o["c_trail"] = json.dumps(t)
+                self.log(f"{o['index']} {o['strike']}{o['opt']}: app trailing SL hit (LTP {ltp}, level {level:g}) "
+                         "- squaring off.")
+                await self.square_off(o["id"], "App trailing SL")
+                continue
+            if ltp > t["high"]:
+                t["high"] = round(ltp, 2)
+                o["c_trail"] = json.dumps(t)
+                dirty = True
+        if dirty:
+            self._rewrite_orders_file()
+            self.bump("orders", "watch")
+
+    def trail_text(self, o) -> str:
+        """e.g. "Trail 20/19 (app) · SL 155" for the card / Order Details."""
+        t = self.app_trail(o)
+        if not t:
+            return ""
+        lvl = self.trail_level(t, trade_tracker._f(o.get("entry")))
+        return (f"Trail {t['trigger']:g}/{t['gap']:g} (app)" + (f" \u00b7 SL {lvl:g}" if lvl is not None else "")
+                + (f" \u2192 hit {t['done']}" if t.get("done") else ""))
 
     # ------------------------------------------------------------------ per-order SL / Target (Order Details)
     @staticmethod
