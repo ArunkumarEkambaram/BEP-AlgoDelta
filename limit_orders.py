@@ -101,11 +101,14 @@ def check_exit(m, ltp):
 
 
 def dry_fill(m, ltp, stamp) -> bool:
-    """Dry run: a BUY limit fills once the LTP is at or below the price, at the price. Returns True when filled."""
+    """Dry run (market hours only - the engine checks): a BUY limit fills once the live LTP is at or below the
+    price, at the LOWER of the two (a gap below the price fills near the LTP, like the exchange would).
+    Returns True when filled."""
     if m.get("state") != "OPEN" or held(m) or ltp is None or ltp > m["price"]:
         return False
-    m.update(filled=m["units"], fill=m["price"], fill_time=stamp, high=m["price"], state="FILLED",
-             msg=f"Filled at {m['price']:.2f} (dry run, LTP {ltp:.2f})")
+    fill = round(min(m["price"], ltp), 2)
+    m.update(filled=m["units"], fill=fill, fill_time=stamp, high=fill, state="FILLED",
+             msg=f"Filled at {fill:.2f} (dry run, LTP {ltp:.2f}, limit {m['price']:.2f})")
     return True
 
 
@@ -180,6 +183,14 @@ def apply_book(m, o, stamp) -> list:
         m["state"] = "OPEN"
         m["msg"] = f"Open at the exchange ({o.get('status')})" + (f", {int(filled)} filled" if filled else "")
     return events
+
+
+def exit_label(m) -> str:
+    """Short reason of the app's / your exit for the card chip, e.g. "App trailing SL", "15:15", "Manual"."""
+    text = (m or {}).get("exit") or ""
+    reason = text.rsplit(" ", 1)[0] if text[-8:].count(":") == 2 else text
+    return {"Manual square-off": "Manual", "Square off all": "Manual", "App 15:15 square-off": "15:15",
+            "Opponent SL": "Opponent SL"}.get(reason, reason)
 
 
 def describe(m) -> str:
