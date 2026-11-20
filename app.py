@@ -500,12 +500,14 @@ def section(title, icon, rows, empty_text, place, name):
         ui.label(empty_text).classes("text-sm opacity-70")
         return
     with ui.grid(columns="90px 80px 50px 90px 60px 140px 1fr 130px 230px 200px").classes("w-full items-center gap-x-3 gap-y-1"):
-        for head in ("Source", "Strike", "Type", "Level", "TF", "Last close", "Status", "Order", "SL / Target", ""):
+        for head in ("Source", "Strike", "Type", level_name(rows[0]), "TF", "Last close", "Status", "Order",
+                     "SL / Target", ""):
             ui.label(head).classes("stat-label")
         for r in rows:
             bg = {"triggered": "bg-green-10 text-green-2", "failed": "bg-red-10 text-red-2"}.get(r["status"], "")
             src = f"\u2b50 {r['trig_time']}" if r.get("source") == "star" else "Manual"
-            cells = [src, str(r["strike"]), r["opt"], f"{r['price']:g}", f"{r['tf']} min",
+            level = manual_type(r) if r.get("source") == "manual" else f"{r['price']:g}"
+            cells = [src, str(r["strike"]), r["opt"], level, f"{r['tf']} min",
                      (f"{r['last_close']:.2f} ({r['last_time']})" if r["last_close"] is not None else "--"),
                      CommonWatch.status_text(r)]
             for txt in cells:
@@ -519,6 +521,19 @@ def section(title, icon, rows, empty_text, place, name):
                 b.set_enabled(r["status"] == "triggered" and not done)
                 ui.button(icon="delete", on_click=lambda _e, r=r: confirm_delete(name, r)) \
                     .props("dense flat size=sm color=grey-6")
+
+
+LEVEL_NAME = {"star": "BEP", "pair": "Pair price", "manual": "Order type"}
+
+
+def level_name(r) -> str:
+    """Heading of a card's level box: Common price (Same strike) / Pair price / BEP (\u2b50) / Order type (Manual)."""
+    return LEVEL_NAME.get(r.get("source"), "Common price")
+
+
+def manual_type(r) -> str:
+    """Manual Entry card's order type: Limit / Price (app waits for the price, then market) / Market."""
+    return "Limit" if r.get("entry_mode") == "limit" else ("Price" if r.get("entry_price") else "Market")
 
 
 def order_type_text(r) -> str:
@@ -1189,7 +1204,7 @@ def order_card(name, r, place, live):
         with ui.row().classes("w-full no-wrap items-stretch overflow-x-auto"):
             entry_lbl = None
             editable = not done and not pending and r["status"] not in ("failed", "exited")
-            with card_box("Entry Price", "edit" if editable else None):
+            with card_box("Entry (filled)" if done else "Entry Price", "edit" if editable else None):
                 if done or r["status"] in ("failed", "exited"):
                     entry_lbl = ui.label("--").classes("text-lg font-bold")
                 else:
@@ -1210,13 +1225,14 @@ def order_card(name, r, place, live):
             with card_box("LTP"):
                 ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
             if r.get("source") == "manual":
-                with card_box("Entry"):
-                    limit = r.get("entry_mode") == "limit"
-                    ui.label("Limit" if limit else "Manual").classes("text-lg font-bold")
-                    ui.label("SL / Target by the app" if limit else "no trigger \u00b7 ready").classes(
-                        "text-xs " + ("text-amber-5" if limit else "opacity-60"))
+                with card_box(level_name(r)):
+                    mt = manual_type(r)
+                    ui.label(mt).classes("text-lg font-bold")
+                    ui.label({"Limit": "SL / Target by the app", "Price": "waits for the price, then market",
+                              "Market": "market order at \u26a1"}[mt]).classes(
+                        "text-xs " + ("text-amber-5" if mt == "Limit" else "opacity-60"))
             else:
-                with card_box("Entry"):
+                with card_box(level_name(r)):
                     with ui.row().classes("items-center gap-1 no-wrap"):
                         ui.icon("show_chart").classes("text-sm")
                         if r.get("kind") == "pair" and r["pe_price"] != r["ce_price"]:
