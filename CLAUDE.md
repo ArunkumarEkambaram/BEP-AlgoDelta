@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #22; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #23; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -8,6 +8,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - **Always discuss requirements before writing code.** Ask questions with "Suggested:" answers and wait for the user's go-ahead.
 - Work on a branch, open a PR, and merge **only when the user says "merge PR #n"**. This applies to **every** change, docs-only ones included (no direct pushes to `main`; confirmed again after PR #17).
 - During market hours, **don't push**. Keep work on a local branch until the user says so.
+- **Never change `main` directly** (no commits, pushes or merges to it on Claude's own initiative), especially near or during market hours. Every change, docs-only ones included, goes to a **new branch**. It's merged later, only when the user says "merge PR #n". The user's running app stays on the `main` it pulled. (Asked on 20 Nov 2026, just before the open. The user can allow an exception in chat, as for PR #23.)
 - After merging, the user runs `git pull origin main` and restarts the app.
 - `__pycache__/`, `settings.json`, `upstox_token.json`, `orders_*.csv` and `common_watch_*.json` are git-ignored. Never commit them.
 - The cloud session can't delete GitHub branches (proxy 403). The user deletes merged branches, or turns on "Automatically delete head branches".
@@ -114,7 +115,8 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - Dry run: CANCELLED at once.
      - A partial fill keeps its filled part protected.
    - **Deleting a card** with an open limit sends `cancel_order` first (user request). A square-off of a partly filled limit cancels the rest first.
-   - **Dry run:** fills at the price once LTP ≤ price, or at once at the LTP if it's already below. The exit is a fresh LTP via the normal square-off.
+   - **Dry run (fixed in PR #23):** fills only in market hours (never before 09:15, when the LTP is stale) at **min(price, live LTP)** once LTP ≤ price, so a gap below the price fills near the LTP. The exit is a fresh LTP via the normal square-off. Placing before 09:15 shows "market not open yet: the limit waits for 09:15".
+   - **Exit chip (PR #23):** EXITED · App SL / App trailing SL / App target / 15:15 / Opponent SL / Manual (from `mg.exit`, also set by `square_off`).
    - **Header badge:** "APP-MANAGED SL ACTIVE (n) - keep this PC on" / "LIMIT OPEN (n)".
    - **Restart:** the state is in the orders file (`mg`), so watching resumes.
    - **Order Details:** shows the limit state and app rules in SL/Target, plus a Cancel order action. The SL/Target can't be edited after placing (`order_rule_editable` is false).
@@ -159,5 +161,5 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #22: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #23: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).

@@ -631,6 +631,8 @@ def card_state(r, order=None) -> str:
         exited = r["status"] == "exited" or (order is not None and trade_tracker._f(order.get("exit")) is not None)
         sq = str((order or {}).get("sq") or "")
         if exited:
+            if m and m.get("exit"):
+                return f"EXITED · {limit_orders.exit_label(m)}"
             return "EXITED · Manual" if engine.squared_off(order or {}) else "EXITED"
         if sq.startswith("SENT"):
             return "SQUARING OFF"

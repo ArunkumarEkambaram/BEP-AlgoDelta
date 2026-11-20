@@ -913,6 +913,10 @@ class Engine:
         if any(x.get("status") == "DRY RUN" for x in group):
             ltp = await self._exit_ltp(o)
         for x in group:
+            mx = limit_orders.parse(x.get("mg"))
+            if mx is not None and not mx.get("exit"):      # remember why a limit position was closed (card chip)
+                mx["exit"] = f"{reason} {t}"
+                self._limit_save(x, mx)
             if x.get("status") == "DRY RUN":
                 x["sq"] = f"DRY RUN {t}"
                 if ltp is not None:
@@ -1039,11 +1043,12 @@ class Engine:
                  "msg": "Sent, waiting for the fill", "sent_at": t, "oid": None, "filled": 0, "fill": None,
                  "fill_time": "", "sl": sl, "tgt": tgt, "trail": trail, "high": None, "cancel_ts": None, "exit": ""}
             if res["status"] == "dry_run":
-                m["msg"] = "Dry run: fills when the LTP is at or below the price"
-                if ltp is not None and ltp <= price:      # marketable limit: a real one fills at once, near the LTP
-                    limit_orders.dry_fill(m, ltp, t)
-                    m.update(fill=round(ltp, 2), high=round(ltp, 2),
-                             msg=f"Filled at once at {ltp:.2f} (dry run; the LTP was already below the limit)")
+                if not market_utils.is_market_open():     # a stale pre-open LTP must not fill it
+                    m["msg"] = "Dry run: market not open yet - waits for 09:15, then fills at or below the price"
+                elif limit_orders.dry_fill(m, ltp, t):    # marketable limit: fills at once, near the LTP
+                    m["msg"] = f"Filled at once at {m['fill']:.2f} (dry run; the LTP was already below the limit)"
+                else:
+                    m["msg"] = "Dry run: fills when the LTP is at or below the price"
             sig["mg"] = limit_orders.dump(m)
         cw.set_order_status(row_id, ORDER_STATUS.get(res["status"], res["status"]))
         self.log(res["message"])
@@ -1052,6 +1057,8 @@ class Engine:
         cw.save()
         self.bump("watch")
         st = ORDER_STATUS.get(res["status"], res["status"].upper())
+        if not market_utils.is_market_open():
+            st += " (market not open yet: the limit waits for 09:15)"
         self.notify(f"{name} {r['strike']}{r['opt']}: LIMIT {price:.2f} {st}"
                     + (" - SL / Target are watched by the app (keep this PC on)." if res["status"] in ("sent", "dry_run")
                        else f" - {res['detail']}"),
