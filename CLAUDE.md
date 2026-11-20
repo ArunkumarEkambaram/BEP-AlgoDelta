@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #24; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #25; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -174,5 +174,27 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #24: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #25: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
+  - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
+  - **Three setups compared:**
+    - **A (today):** PC → AlgoDelta → Upstox.
+    - **B:** the app on a cloud server, still through AlgoDelta. Gives uptime, almost no code change.
+    - **C:** cloud + **Upstox direct** with the server's static IP (no AlgoDelta). Fastest. Real limit/modify/cancel by order ID, per-order square-off, SL at the exchange (SL-M/GTT). The biggest build and the most to maintain.
+  - **Cloud cost estimates** (1 GB server, Mumbai/Bangalore, incl. 18% GST, ~₹85/$, check current prices):
+    - AWS Lightsail ~₹500–600 (static IP included while attached);
+    - DigitalOcean ~₹600–700;
+    - AWS EC2 t3.micro + Elastic IP ~₹1,150–1,250;
+    - Azure B1s + static IP ~₹1,200–1,300.
+    - Upstox's API plan cost is to be checked by the user.
+    - Saving against AlgoDelta is ~₹250–450/month; the real gain is features.
+  - **Development stays the same in the cloud:** branch → PR → "merge PR #n" → on the server `git pull` + restart (a deploy script was offered).
+  - **Effort:**
+    - server setup is easy to moderate (1–2 h with guidance: Python, clone, run as a boot service, IST clock, login + HTTPS, register the static IP in the Upstox app);
+    - the Upstox direct order module is the complicated part (place/modify/cancel by order ID, SL orders, trailing by modifying the SL, error handling, 1-lot live tests).
+  - **Agreed plan (phased):**
+    1. Cloud + keep AlgoDelta.
+    2. Build Upstox direct **alongside** AlgoDelta, with a Setup switch "AlgoDelta / Upstox direct"; test with 1 lot.
+    3. Drop AlgoDelta once direct is proven.
+  - **Next step when resumed:** write up the questions for Phase 1 (cloud hosting) or the Upstox direct module, as the user chooses.
 - **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).
