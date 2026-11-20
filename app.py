@@ -716,6 +716,29 @@ def card_rule_box(name, r, kind, locked):
                        + (f"set to {exit_rules.describe(new_rule)}" if new_rule else "back to default"))
             engine.bump("watch")
 
+    if order is not None and not m:                   # ordered (not a limit order): app-watched rule on top
+        o_rule = exit_rules.parse(order.get("c_" + kind))
+        editable = engine.order_rule_editable(order)
+
+        def on_order_set(new_rule, oid=order["id"]):
+            engine.set_order_custom(oid, kind, new_rule)
+            engine.bump("watch")
+        with card_box(what, "edit" if editable else None):
+            with ui.row().classes("items-center gap-1 no-wrap"):
+                if o_rule:
+                    ui.icon("candlestick_chart" if o_rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
+                v = ui.label(f"{o_rule['value']:.2f}" if o_rule else f"{d_val:g} {d_type}").classes("text-lg font-bold")
+                if editable:
+                    v.classes("cursor-pointer")
+                    v.on("click", lambda: rule_dialog(f"{what} (app-watched)", kind, o_rule, on_order_set))
+                    if o_rule:
+                        ui.button(icon="close", on_click=lambda: on_order_set(None)) \
+                            .props("flat dense round size=xs color=red").tooltip("Remove the app rule")
+            ui.label(exit_rules.describe(o_rule) + " \u00b7 app" if o_rule else
+                     "as sent" + (" \u00b7 click to add an app rule" if editable else "")) \
+                .classes("text-xs " + ("text-amber-5" if o_rule else "opacity-60"))
+        return
+
     with card_box(what, "edit" if rule and not locked else None):
         if rule:
             with ui.row().classes("items-center gap-1 no-wrap"):
@@ -743,11 +766,13 @@ def card_rule_box(name, r, kind, locked):
                 ui.label(f"Default {d_val:g} {d_type} (Setup)").classes("text-xs opacity-60")
 
 
-def trail_dialog(name, r):
-    """Card's own trailing SL: ON/OFF, Type, Trigger, Point, Gap (starts from the card's current values)."""
-    cur = engine.row_trail(name, r)
+def trail_dialog(name, r, cur=None, on_save=None, note=None):
+    """Trailing SL popup: ON/OFF, Type, Trigger, Point, Gap. Default: the card's own (before ordering). With
+    on_save: a placed order's app-watched trailing SL (cur = its values)."""
+    order_mode = on_save is not None
+    cur = cur or engine.row_trail(name, r)
     with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 380px"):
-        ui.label("Trailing SL for this card").classes("text-lg font-bold")
+        ui.label("App trailing SL for this order" if order_mode else "Trailing SL for this card").classes("text-lg font-bold")
         on = ui.switch("Trailing SL", value=cur["on"])
         with ui.column().classes("w-full gap-1") as fields:
             typ = ui.select(["LTP", "POINT"], value=cur["type"], label="Trail type").classes("w-full")
@@ -758,8 +783,12 @@ def trail_dialog(name, r):
             ui.label("Once the high reaches entry + Trigger, SL = high \u2212 Gap (in steps of Point); it never moves "
                      "down. Gap = Trigger moves the SL to cost at the trigger.").classes("text-xs opacity-70")
         fields.bind_visibility_from(on, "value")
-        ui.label("Watched by the app for this limit order (no change after placing)." if r.get("entry_mode") == "limit"
-                 else "Sent with this card's AlgoDelta order (no change after placing).").classes("text-xs opacity-70")
+        sl_rule = exit_rules.parse((r or {}).get("c_sl"))
+        ui.label(note or ("Watched by the app for this limit order (no change after placing)."
+                          if (r or {}).get("entry_mode") == "limit" else
+                          "Watched by the app on the live LTP (the CANDLE SL stops AlgoDelta from trailing)."
+                          if sl_rule and sl_rule["type"] == "CANDLE" else
+                          "Sent with this card's AlgoDelta order (no change after placing).")).classes("text-xs opacity-70")
 
         def save():
             if on.value:
@@ -777,14 +806,23 @@ def trail_dialog(name, r):
                 trail = {"on": True, "type": typ.value, "trigger": t, "point": pt, "gap": g}
             else:
                 trail = {**cur, "on": False}
-            engine.set_watch_trail(name, r["id"], trail)
+            if order_mode:
+                on_save(trail)
+            else:
+                engine.set_watch_trail(name, r["id"], trail)
             dlg.close()
 
         def use_setup():
-            engine.set_watch_trail(name, r["id"], None)
+            if order_mode:
+                on_save(None)
+            else:
+                engine.set_watch_trail(name, r["id"], None)
             dlg.close()
         with ui.row().classes("w-full justify-between"):
-            ui.button("Use Setup", on_click=use_setup).props("flat" + ("" if r.get("c_trail") else " disable"))
+            if order_mode:
+                ui.button("Remove", on_click=use_setup).props("flat" + ("" if cur.get("on") else " disable"))
+            else:
+                ui.button("Use Setup", on_click=use_setup).props("flat" + ("" if r.get("c_trail") else " disable"))
             with ui.row().classes("gap-2"):
                 ui.button("Close", on_click=dlg.close).props("color=red")
                 ui.button("Save", on_click=save)
@@ -793,8 +831,9 @@ def trail_dialog(name, r):
 
 
 def card_trail_box(name, r, locked):
-    """Trailing box: the card's own trailing SL or Setup's. Click to change until ordered. Not with a CANDLE SL
-    (the app watches that SL, so AlgoDelta gets is_sl false and cannot trail)."""
+    """Trailing box: the card's own trailing SL or Setup's; click to change until ordered. With a CANDLE SL the
+    trail is watched by the app (AlgoDelta gets is_sl false and cannot trail). Once ordered: the app trail can be
+    added / changed while the order is open."""
     sl_rule = exit_rules.parse(r.get("c_sl"))
     order = engine.row_order(r) if locked else None
     own = bool(r.get("c_trail"))
@@ -806,24 +845,36 @@ def card_trail_box(name, r, locked):
                 "text-lg font-bold" + ("" if t else " opacity-70"))
             ui.label("app-watched" + (f" \u00b7 step {t['step']:g}" if t else "")).classes("text-xs text-amber-5")
             return
-        if order:                                     # what was actually sent
+        if order:                                     # app trail if set, else what was actually sent
             prm = trade_tracker._params(order)
-            if prm["trail"] and prm["is_sl"]:
-                ui.label(f"{prm['trigger']:g} / {prm['gap']:g}").classes("text-lg font-bold")
+            t = engine.app_trail(order)
+            editable = engine.order_rule_editable(order)
+            if t:
+                v = ui.label(f"{t['trigger']:g} / {t['gap']:g}").classes("text-lg font-bold")
+                lvl = engine.trail_level(t, trade_tracker._f(order.get("entry")))
+                ui.label("app-watched" + (f" \u00b7 SL {lvl:g}" if lvl is not None else f" \u00b7 step {t['step']:g}")
+                         + (" \u00b7 hit" if t.get("done") else "")).classes("text-xs text-amber-5")
+            elif prm["trail"] and prm["is_sl"]:
+                v = ui.label(f"{prm['trigger']:g} / {prm['gap']:g}").classes("text-lg font-bold")
                 ui.label(f"as sent \u00b7 step {prm['step']:g}").classes("text-xs opacity-60")
             else:
-                ui.label("OFF").classes("text-lg font-bold opacity-70")
-                ui.label("as sent").classes("text-xs opacity-60")
+                v = ui.label("OFF").classes("text-lg font-bold opacity-70")
+                ui.label("as sent" + (" \u00b7 click to add" if editable else "")).classes("text-xs opacity-60")
+            if editable:
+                cur = {"on": True, "type": "LTP", "trigger": t["trigger"], "point": t["step"], "gap": t["gap"]} if t \
+                    else {**engine.row_trail(name, r), "on": True}
+                v.classes("cursor-pointer")
+                v.on("click", lambda _e=None, cur=cur: trail_dialog(
+                    name, r, cur=cur, on_save=lambda tr: engine.set_order_trail(order["id"], tr),
+                    note="Watched by the app on the live LTP for this order. AlgoDelta's own trail (if sent) stays "
+                         "too - whichever hits first exits."))
             return
-        if sl_rule and sl_rule["type"] == "CANDLE":
-            ui.label("OFF").classes("text-lg font-bold opacity-70")
-            ui.label("not with a CANDLE SL").classes("text-xs text-amber-5")
-            return
+        candle_sl = bool(sl_rule and sl_rule["type"] == "CANDLE")
         tr = engine.row_trail(name, r)
         src = "this card" if own else "Setup"
         if tr["on"]:
             v = ui.label(f"{tr['trigger']:g} / {tr['gap']:g}").classes("text-lg font-bold")
-            sub = f"{src} \u00b7 {tr['type']} \u00b7 step {tr['point']:g}"
+            sub = f"{src} \u00b7 {tr['type']} \u00b7 step {tr['point']:g}" + (" \u00b7 app (CANDLE SL)" if candle_sl else "")
         else:
             v = ui.label("OFF" if own or locked else "Set Trailing").classes(
                 "text-lg font-bold opacity-70" if own or locked else "text-blue-5 font-medium")
@@ -1592,6 +1643,19 @@ def orders_page():
             rule_toggle("SL", "sl", r.get("c_sl"), f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}", False,
                         setter("sl"))
             rule_toggle("Target", "tgt", r.get("c_tgt"), "Common (as sent)", False, setter("tgt"))
+            t = engine.app_trail(r)
+
+            def open_trail():
+                dlg.close()
+                cur = {"on": True, "type": "LTP", "trigger": t["trigger"], "point": t["step"], "gap": t["gap"]} if t \
+                    else {**engine.setup_trail(r["index"]), "on": True}
+                trail_dialog(r["index"], {}, cur=cur, on_save=lambda tr: engine.set_order_trail(rid, tr),
+                             note="Watched by the app on the live LTP for this order. AlgoDelta's own trail (if sent) "
+                                  "stays too - whichever hits first exits.")
+            with ui.row().classes("items-center gap-2"):
+                ui.label("Trailing: " + (engine.trail_text(r) or "none (app)")).classes("text-sm")
+                ui.button("Set trailing" if not t else "Change", icon="trending_up", on_click=open_trail) \
+                    .props("dense flat no-caps color=primary")
             ui.button("Close", on_click=dlg.close).props("flat")
         dlg.open()
     table.on("rules", open_rules)
@@ -1617,6 +1681,8 @@ def orders_page():
                          "App " + (limit_orders.describe(m) or "no SL / Target")] + parts
                 if m.get("exit"):
                     parts.append(m["exit"])
+            if engine.trail_text(r):
+                parts.append(engine.trail_text(r))
             r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
             r["cx_action"] = ("Retry cancel" if m["state"] == "CANCEL FAILED" else "Cancel order") \
                 if limit_orders.cancellable(m) else ""

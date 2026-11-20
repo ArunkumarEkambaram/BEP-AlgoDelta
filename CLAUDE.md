@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #23; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #24; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -72,7 +72,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     - The Upstox token is saved for **today only** and reconnects automatically on start; there's a "Forget saved token" button.
 11. **Per-card Trailing SL (PR #15):**
    - Click the card's Trailing box to open a popup: ON/OFF, Type, Trigger, Point and Gap. It starts from Setup and is stored as `c_trail` (`engine.row_trail`).
-   - It's sent in that card's JSON (and simulated in dry run) and locks once ordered. It's not available with a CANDLE SL (`is_sl` false).
+   - It's sent in that card's JSON (and simulated in dry run) and locks once ordered. With a CANDLE SL (`is_sl` false), AlgoDelta can't trail, so since PR #24 **the app** watches the trail instead (decision 18).
    - Ordered cards show the Target, SL and Trail **as sent** (from the order JSON).
    - Start/End time was dropped (the user doesn't want it).
 12. **Manual square-off (PR #16):**
@@ -137,6 +137,19 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - Pair opponent exit: a filled limit is squared off and an open one is cancelled (`handle_pair_exits`).
      - Delete and 15:15 work as for Manual.
 
+18. **App trailing SL and editing after placing (PR #24):**
+   - **CANDLE SL + trailing:** the card's trail (own or Setup) is no longer forced OFF. It's stored on the order as `c_trail` (`{"trigger","gap","step","set_at","high","done"}`, a new orders-file column) and watched by the app on the **live LTP every 2 s** (`check_app_trails`).
+     - The rule: once the high reaches entry + trigger, SL = high − gap (steps of point), and it never moves down.
+     - LTP ≤ SL → `squareoff_position` **once** ("App trailing SL").
+     - Entry = the order's Entry (Upstox fill live, signal LTP in dry run).
+     - The CANDLE SL is still checked on candle closes; whichever hits first exits.
+   - **Ordered, still-open cards (not limit orders, not the 09:15 order)** are editable while open:
+     - Target / Stoploss: a click opens the rule popup and sets an app-watched rule (`set_order_custom`, the same as Order Details).
+     - Trailing: a click opens the trail popup (`set_order_trail`; Remove clears it).
+     - AlgoDelta's original SL/Target/trail stay active (no modify syntax); whichever hits first exits.
+   - **Order Details:** the SL/Target popup gains **Set trailing / Change**, and the SL/Target column shows `Trail a/b (app) · SL x`.
+   - **Dry run:** the same check on the live LTP; the exit is a fresh LTP via the square-off.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -161,5 +174,5 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #23: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #24: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now).
