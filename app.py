@@ -736,9 +736,11 @@ def card_rule_box(name, r, kind, locked):
         o_rule = exit_rules.parse(order.get("c_" + kind))
         editable = engine.order_rule_editable(order)
 
-        def on_order_set(new_rule, oid=order["id"]):
-            engine.set_order_custom(oid, kind, new_rule)
-            engine.bump("watch")
+        def on_order_set(new_rule, oid=order["id"], entry=trade_tracker._f(order.get("entry"))):
+            def apply(rule):
+                engine.set_order_custom(oid, kind, rule)
+                engine.bump("watch")
+            guarded_sl_set(kind, new_rule, entry, apply)
         with card_box(what, "edit" if editable else None):
             with ui.row().classes("items-center gap-1 no-wrap"):
                 if o_rule:
@@ -1312,6 +1314,48 @@ def om_header(title, help_text):
     ui.label(help_text + " Nothing is placed automatically: use ⚡ Place order.").classes("text-xs opacity-70")
 
 
+def sl_warning(rule, ref, ref_name) -> str:
+    """Warning text when an SL rule (LTP / CANDLE) is at or above the reference price (entry / LTP / limit),
+    i.e. it would exit at once or at the next candle close. "" when fine (POINT is always below the entry)."""
+    if not rule or ref is None or rule.get("type") not in ("LTP", "CANDLE") or rule.get("value") is None:
+        return ""
+    v = float(rule["value"])
+    if v < ref:
+        return ""
+    when = (f"the next {rule.get('tf') or 5}-min candle close below {v:g} exits at once"
+            if rule["type"] == "CANDLE" else "it exits at once")
+    return f"SL {v:g} ({rule['type']}) is at or above the {ref_name} {ref:.2f}: {when}."
+
+
+def confirm_warnings(title, lines, then, ok_label="Continue"):
+    """Popup listing warnings; Continue runs `then` (sync or async)."""
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
+        with ui.row().classes("items-center gap-2 no-wrap"):
+            ui.icon("warning").classes("text-2xl text-orange-5")
+            ui.label(title).classes("text-lg font-bold")
+        for line in lines:
+            ui.label("\u2022 " + line).classes("text-sm")
+
+        async def go():
+            dlg.close()
+            res = then()
+            if hasattr(res, "__await__"):
+                await res
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            ui.button(ok_label, on_click=go).props("color=orange-9")
+    dlg.open()
+
+
+def guarded_sl_set(kind, rule, entry, apply):
+    """Setting an SL after placing: asks first when it is at or above the Entry (it would exit at once)."""
+    warn = sl_warning(rule, entry, "Entry") if kind == "sl" else ""
+    if warn:
+        confirm_warnings("Check the stoploss", [warn], lambda: apply(rule), "Set anyway")
+    else:
+        apply(rule)
+
+
 def make_place(name):
     """The card's \u26a1: market order now, or arm the entry price. Warns first when the option is already open."""
     async def place(row_id):
@@ -1334,17 +1378,36 @@ def make_place(name):
             res = confirm_same_option(name, r, do)
             if hasattr(res, "__await__"):
                 await res
-        if r.get("entry_mode") == "limit":
-            lp = engine.limit_price(r)
+        ltp = engine.row_live_ltp(name, r)
+        if ltp is None and r.get("strike") is not None:
+            ltp = await engine.quote_option(name, r["strike"], r["opt"])
+        limit = r.get("entry_mode") == "limit"
+        lp = engine.limit_price(r) if limit else None
+
+        async def guarded():
+            """SL at / above the price you buy at, or the price already back below the level: ask first."""
+            warns = []
+            cfg = config.AUTO_ORDER[name]
+            sl = exit_rules.parse(r.get("c_sl")) or {"type": cfg.get("sl_type"), "value": cfg.get("sl")}
+            ref = lp if limit else (r.get("entry_price") or ltp)
+            w = sl_warning(sl, ref, "limit price" if limit else ("entry price" if r.get("entry_price") else "LTP"))
+            if w:
+                warns.append(w)
+            lvl = r.get("price") if r.get("source") != "manual" else None
+            if lvl and ltp is not None and ltp < float(lvl):
+                warns.append(f"The price is already back below the {level_name(r)} {float(lvl):g} "
+                             f"(LTP {ltp:.2f}): the setup may have failed.")
+            if warns:
+                confirm_warnings("Check before placing", warns, checked, "Place anyway")
+                return
+            await checked()
+        if limit:
             if not lp:
                 ui.notify("Set the limit price first.", type="warning")
                 return
-            ltp = engine.row_live_ltp(name, r)
-            if ltp is None:
-                ltp = await engine.quote_option(name, r["strike"], r["opt"])
-            if not limit_sanity_ok(lp, ltp, checked):
+            if not limit_sanity_ok(lp, ltp, guarded):
                 return
-        await checked()
+        await guarded()
     return place
 
 
@@ -1706,8 +1769,9 @@ def orders_page():
 
             def setter(kind):
                 def on_set(rule):
-                    engine.set_order_custom(rid, kind, rule)
                     dlg.close()
+                    guarded_sl_set(kind, rule, trade_tracker._f(r.get("entry")),
+                                   lambda rl: engine.set_order_custom(rid, kind, rl))
                 return on_set
             rule_toggle("SL", "sl", r.get("c_sl"), f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}", False,
                         setter("sl"))

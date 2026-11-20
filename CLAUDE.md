@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #29; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #30; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -180,6 +180,14 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Order Details:** the Captured Points / P&L ₹ columns show `x (open)` for open orders (`open_points`/`open_pnl`, not saved), and the summary adds "open n: P&L ₹x" (the closed totals are unchanged).
    - Upstox is still needed for the LTP itself and for live fills/exits (trade book every 30 s).
 
+23. **Pre-place / SL safety warnings (PR #30):**
+   - **Why:** a Same strike card (level 120) was placed at 14:03 with LTP 111 and a CANDLE SL of 120. The next 5-min close (109.30 < 120) exited at once.
+   - **At ⚡ ("Check before placing", Place anyway / Cancel; after the limit typo guard, before the same-option confirm):**
+     - an SL (the card's own, else Setup's) of type LTP/CANDLE **at or above** the price you buy at (the LTP, the Entry Price or the limit price);
+     - the LTP is **already back below** the row's level (Common price / Pair price / BEP): "the setup may have failed". Not for Manual cards.
+   - **Setting an SL after placing** (the ordered card or the Order Details popup): "Check the stoploss" when it's at or above the Entry (`guarded_sl_set`).
+   - POINT SLs are always below the entry, so they're never flagged.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -204,7 +212,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #29: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #30: `claude/amazing-allen-klxor4`), recreated from `main` for each PR. The user deletes it after a merge.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
