@@ -324,16 +324,39 @@ class Engine:
             self.bump("watch")
         return ok
 
-    def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf):
-        r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now())
-        self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min.")
+    def add_pair(self, name, ce_strike, pe_strike, ce_price, pe_price, buffer, tf, mode=None):
+        r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now(), mode)
+        self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min"
+                 + (", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
 
-    def add_watch(self, name, strike, leg, price, tf):
-        rows = self.watches[name].add(strike, leg, price, tf, _now())
+    def add_watch(self, name, strike, leg, price, tf, mode=None):
+        rows = self.watches[name].add(strike, leg, price, tf, _now(), mode)
         self.log(f"{name} common price watch added: "
-                 + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows))
+                 + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows)
+                 + (", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
+
+    def set_watch_mode(self, name, row_id, mode) -> bool:
+        """Card order type: "limit" (AlgoDelta limit_order, app SL / Target) or None (strategy_order)."""
+        ok = self.watches[name].set_mode(row_id, mode)
+        if ok:
+            r = self.watches[name].get(row_id)
+            what = CommonWatch.pair_title(r) if r.get("kind") == "pair" and not r.get("opt") else f"{r['strike']}{r['opt']}"
+            self.log(f"{name} {what}: order type " + (
+                "LIMIT" + (f" at {r['entry_price']:.2f}" if r.get("entry_price") else " at the fired leg's price")
+                if mode == "limit" else "strategy order") + ".")
+            self.bump("watch")
+        return ok
+
+    @staticmethod
+    def limit_price(r):
+        """Price a limit card is sent at: its Entry Price, else the row's level (Pair: the fired leg's price).
+        A Manual Entry card always has its own price."""
+        p = r.get("entry_price")
+        if not p and r.get("source") != "manual":
+            p = r.get("price")
+        return float(p) if p else None
 
     def row_qty(self, name, r) -> int:
         """Lots for an Order Management row: its own value, else the Setup quantity."""
@@ -409,6 +432,16 @@ class Engine:
         self.watches[name].remove(row_id)
         self.bump("watch")
 
+    async def cancel_dead_limits(self, name):
+        """A card that turned FAILED / EXITED cancels its limit order if it is still open at the exchange
+        (a filled part stays, protected by the app SL / Target)."""
+        for r in list(self.watches[name].rows):
+            if r["status"] not in ("failed", "exited"):
+                continue
+            o = self.row_order(r)
+            if o is not None and limit_orders.cancellable(limit_orders.parse(o.get("mg"))):
+                await self.cancel_limit(o["id"], f"card {r['status'].upper()}")
+
     async def delete_watch(self, name, row_id):
         """Deletes a card. A limit order still open at the exchange is cancelled first (cancel_order); an app-side
         pending entry simply stops. A placed order stays in Order Details (its app SL / Target keep running)."""
@@ -460,8 +493,8 @@ class Engine:
         r = cw.get(row_id)
         if not r or r.get("order_status") in ORDER_LOCKED + ("PENDING",):
             return False
-        if r.get("entry_mode") == "limit" and not price:       # a limit card always needs its price
-            return False
+        if r.get("entry_mode") == "limit" and not price and r.get("source") == "manual":
+            return False                                     # a Manual limit card always needs its price
         r["entry_price"] = round(float(price), 2) if price else None
         r["entry_dir"] = direction if r["entry_price"] else None
         cw.save()
@@ -604,7 +637,18 @@ class Engine:
                 continue
             already = isinstance(row.get("exit"), (int, float)) or trade_tracker._f(row.get("exit")) is not None \
                 or self.squared_off(row)
-            if already:
+            m = limit_orders.parse(row.get("mg"))
+            if m is not None and not already:              # limit order: square off a fill, cancel what is open
+                if self.is_open(row):
+                    res = await self.square_off(row["id"], "Opponent SL")
+                    status = ORDER_STATUS.get(res["status"], res["status"].upper()) if res else "not needed"
+                elif limit_orders.cancellable(m):
+                    res = await self.cancel_limit(row["id"], "Opponent SL")
+                    status = "limit cancel " + (ORDER_STATUS.get(res["status"], res["status"].upper()) if res else "-")
+                else:
+                    status = "not needed"
+                self.log(f"Pair {CommonWatch.pair_title(ev)}: {why} - limit order: {status}.")
+            elif already:
                 self.log(f"Pair {CommonWatch.pair_title(ev)}: {why}, but the order had already exited - nothing to do.")
                 status = "not needed"
             elif row.get("status") == "DRY RUN":
@@ -716,6 +760,7 @@ class Engine:
                         self.bump("watch")
 
                     await self.handle_pair_exits(name)
+                    await self.cancel_dead_limits(name)
                     await self.dispatch_orders(name)
                 except Exception as ex:
                     self.log(f"{name} BEP monitor error: {ex}")
@@ -967,22 +1012,24 @@ class Engine:
         r = cw.get(row_id)
         if not r or r["status"] != "triggered" or r.get("order_status") in ORDER_LOCKED:
             return None
-        price = r.get("entry_price")
+        price = self.limit_price(r)
         if not price:
             self.notify(f"{name} {r['strike']}{r['opt']}: set the limit price first.", "warning")
             return None
-        price = float(price)
         ltp = self.row_live_ltp(name, r)
         if ltp is None:
             ltp = await self.quote_option(name, r["strike"], r["opt"])
         sl, tgt, trail, app_rules = self._limit_rules(name, r)
         lots = self.row_qty(name, r)
         t = _stamp()
+        kind = {"star": "star", "pair": "pair", "manual": "manual"}.get(r.get("source"), "common")
+        label = {"star": "Manual — ⭐ support", "pair": "Manual — pair",
+                 "common": "Manual — common price", "manual": "Manual entry"}[kind]
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "price": price, "bep": price,
                "ltp": float(ltp if ltp is not None else price),
                "entry_note": f"LIMIT {price:.2f}" + (f", LTP {ltp:.2f} at the click" if ltp is not None else ""),
-               "expiry": mon.expiry, "order_type": "limit_order", "kind": "manual",
-               "kind_label": "Manual entry — limit", "time": t, "params": {"qty": lots}, "app_rules": app_rules}
+               "expiry": mon.expiry, "order_type": "limit_order", "kind": kind,
+               "kind_label": label + " — limit", "time": t, "params": {"qty": lots}, "app_rules": app_rules}
         r["pending"] = None
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
