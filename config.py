@@ -66,6 +66,7 @@ SUPPORT_FAIL_WINDOW_CANDLES = 3
 SUPPORT_SETUP_EXPIRY_CANDLES = 3
 
 # BEP Pair cross (BEP Support > BEP Pair cross, pair_cross.py): a CE and a PE near ATM split around their BEPs.
+BEP_CROSS_ITM_STRIKES = 2        # the buy leg (closing above BEP) may be ATM or up to this many strikes ITM
 BEP_CROSS_TOUCH_TOL = 1.0         # a leg "touched" its BEP when low <= BEP + this and high >= BEP - this
 BEP_CROSS_TOUCH_CANDLES = 3       # the touch must be on the signal candle or the 2 candles before it
 BEP_CROSS_WATCH_CANDLES = 6       # watched for 6 candles (30 min) after the signal: HELD or FAILED

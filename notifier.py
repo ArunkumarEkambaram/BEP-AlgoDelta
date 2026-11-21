@@ -13,11 +13,10 @@ def support_label(e: dict) -> str:
 def cross_label(e: dict) -> str:
     """BEP Pair cross signal (pair_cross.py): one leg closed above its BEP, the other below its BEP."""
     up, dn = e["up"], e["dn"]
-    side = "Bullish" if e.get("dir") == "up" else "Bearish"
     also = f" | also {', '.join(e['also'])}" if e.get("also") else ""
-    return (f"{e.get('index', 'NIFTY')} BEP Pair cross {e['time']} ({side}): {up['strike']}{up['opt']} closed "
-            f"{up['close']:.2f} above BEP {up['bep']:.2f} | {dn['strike']}{dn['opt']} closed {dn['close']:.2f} "
-            f"below BEP {dn['bep']:.2f} | ATM {e.get('atm')}{also}")
+    return (f"{e.get('index', 'NIFTY')} BEP Pair cross {e['time']}: BUY {up['strike']}{up['opt']} (closed "
+            f"{up['close']:.2f} above BEP {up['bep']:.2f}) | opponent {dn['strike']}{dn['opt']} closed "
+            f"{dn['close']:.2f} below BEP {dn['bep']:.2f} | ATM {e.get('atm')}{also}")
 
 
 def common_label(r: dict) -> str:

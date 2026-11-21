@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #33; PR #34 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #34; PR #35 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -204,10 +204,13 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 25. **BEP Pair cross, Pair auto-add and Replay (PR #33):**
    - **What:** on each closed 5-min candle (the board's candles, no extra API calls), a CE and a PE near ATM that **split around their BEPs**. It's independent of the Support board and ⭐. Examples from the user: 20 Nov 09:45 25450CE/25450PE (same strike, full body) and 11:35 25500CE/25550PE (different strikes, wicks).
    - **Pairs:** ATM = the strike nearest NIFTY's close of that candle.
-     - **Bullish:** the leg above is the CE at ATM or ATM − 50 (1 strike ITM); the leg below is the PE at ATM − 50, ATM or ATM + 50.
-     - **Bearish:** the leg above is the PE at ATM or ATM + 50; the leg below is the CE at ATM ± 50.
+     - **Buy CE:** the leg above (the one to buy) is the CE at ATM or up to **2 strikes ITM** (ATM − 50, ATM − 100; `BEP_CROSS_ITM_STRIKES` = 2, PR #35; it was 1); the opponent below is the PE at ATM − 50, ATM or ATM + 50.
+     - **Buy PE:** the leg above is the PE at ATM or up to 2 strikes ITM (ATM + 50, ATM + 100); the opponent is the CE at ATM ± 50.
+     - **Why 2 (PR #35):** on 20 Nov at 09:40, 25400CE closed above its BEP and 25450PE below, but NIFTY was about 25,485 (ATM 25500), so 25400 was 2 strikes ITM and was never checked.
    - **Signal:** the up-leg closes > its BEP **and** the down-leg closes < its BEP, and the previous candle wasn't in that state. Either leg may have crossed first (e.g. PE below at 09:40, CE above at 09:45). A pair already split on the first candle counts. No margin past BEP.
    - **Touch (user request):** both legs must have **touched** their BEP (low ≤ BEP + `BEP_CROSS_TOUCH_TOL` = 1 and high ≥ BEP − 1) on the signal candle or the 2 before (`BEP_CROSS_TOUCH_CANDLES` = 3). A leg far away from its BEP doesn't count.
+   - **Labels (PR #35, the user is an option buyer and never shorts):** the Signal column shows a **Buy CE** (green) / **Buy PE** (red) badge (no ↑/↓ arrows); the columns are "Buy leg (closed above BEP)" and "Opponent (closed below BEP)"; Pts since / Best are for the **buy leg only**; alerts read "BUY 25400CE … | opponent 25450PE …".
+   - **"Why no row?" checker (PR #35):** CE strike, PE strike, candle HH:MM + Check on the BEP Pair cross page (today or the replayed day). It lists each rule as ✓/✗ (`PairCross.explain` via `BepMonitor.explain_cross`): candles/BEPs, split, buy leg in range (NIFTY close, ATM), opponent in range, fresh, touch of each leg (times), already WATCHING, or signalled (main row or "Also").
    - **Rows:** one per candle and direction. The best pair is the same strike first, else the smallest BEP gap; the others go in "Also". No new row for a pair while it's WATCHING; after FAILED it can signal again.
    - **Watch 30 min** (`BEP_CROSS_WATCH_CANDLES` = 6): FAILED · time if the up-leg closes below its BEP or the down-leg closes above its BEP, else HELD. The table shows the best move of each leg and live LTPs (the 2 s batch) while watching.
    - **Alerts:** a toast + browser notification **only on a live signal** (respects Pause alerts). Rows rebuilt after a late start don't alert.
@@ -245,7 +248,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #34: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #35: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

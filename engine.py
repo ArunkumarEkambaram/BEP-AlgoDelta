@@ -772,6 +772,13 @@ class Engine:
             self.replay_busy = False
             self.bump("replay", "board", "cross")
 
+    async def explain_cross(self, name, ce_strike, pe_strike, hhmm) -> list:
+        """BEP Pair cross "Why no row?" for the day the BEP Support pages show (live or replay)."""
+        try:
+            return await run.io_bound(self.view_monitor(name).explain_cross, ce_strike, pe_strike, hhmm)
+        except Exception as ex:
+            return [(False, f"Check failed: {ex}")]
+
     def stop_replay(self):
         self.replays, self.replay_info, self.replay_date = {}, "", ""
         self.bump("replay", "board", "cross")

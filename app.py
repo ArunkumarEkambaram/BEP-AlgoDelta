@@ -56,20 +56,20 @@ BEP_EXPORT_COLUMNS = [
     ("status", "Status"), ("fail_time", "Failed at"), ("fail_close", "Fail close"), ("ltp", "LTP"),
 ]
 CROSS_EXPORT_COLUMNS = [
-    ("index", "Index"), ("time", "Signal candle"), ("direction", "Direction"), ("nifty", "NIFTY close"),
-    ("atm", "ATM"), ("up_leg", "Leg above"), ("up_bep", "Its BEP"), ("up_close", "Its close"),
-    ("dn_leg", "Leg below"), ("dn_bep", "Its BEP "), ("dn_close", "Its close "), ("best_up", "Best move above (pts)"),
-    ("best_dn", "Best move below (pts)"), ("status", "Status"), ("fail_why", "Failed because"), ("also", "Also"),
+    ("index", "Index"), ("time", "Signal candle"), ("direction", "Signal"), ("nifty", "NIFTY close"),
+    ("atm", "ATM"), ("up_leg", "Buy leg (closed above BEP)"), ("up_bep", "Buy leg BEP"), ("up_close", "Buy leg close"),
+    ("dn_leg", "Opponent (closed below BEP)"), ("dn_bep", "Opponent BEP"), ("dn_close", "Opponent close"),
+    ("best_up", "Buy leg best move (pts)"), ("status", "Status"), ("fail_why", "Failed because"), ("also", "Also"),
 ]
 CROSS_COLUMNS = [
     {"name": "time", "label": "Candle", "field": "time", "align": "left"},
-    {"name": "dir", "label": "Dir", "field": "dir", "align": "left"},
+    {"name": "dir", "label": "Signal", "field": "dir", "align": "left"},
     {"name": "atm", "label": "NIFTY · ATM", "field": "atm", "align": "left"},
-    {"name": "up", "label": "Closed above BEP", "field": "up", "align": "left"},
-    {"name": "dn", "label": "Closed below BEP", "field": "dn", "align": "left"},
-    {"name": "ltp", "label": "LTP above · below", "field": "ltp", "align": "right"},
-    {"name": "pts", "label": "Pts since", "field": "pts", "align": "right"},
-    {"name": "best", "label": "Best", "field": "best", "align": "right"},
+    {"name": "up", "label": "Buy leg (closed above BEP)", "field": "up", "align": "left"},
+    {"name": "dn", "label": "Opponent (closed below BEP)", "field": "dn", "align": "left"},
+    {"name": "ltp", "label": "LTP buy · opponent", "field": "ltp", "align": "right"},
+    {"name": "pts", "label": "Buy leg pts since", "field": "pts", "align": "right"},
+    {"name": "best", "label": "Buy leg best", "field": "best", "align": "right"},
     {"name": "status", "label": "Status", "field": "status", "align": "left"},
     {"name": "also", "label": "Also", "field": "also", "align": "left"},
 ]
@@ -501,14 +501,46 @@ def support_page():
 def pair_cross_page():
     support_toolbar("BEP Support — BEP Pair cross")
     tol, n_touch = getattr(config, "BEP_CROSS_TOUCH_TOL", 1.0), getattr(config, "BEP_CROSS_TOUCH_CANDLES", 3)
-    ui.label(f"5-min candles, ATM = strike nearest NIFTY's close. A row = on this candle one leg closed ABOVE its BEP and "
-             f"the other BELOW its BEP, for the first time (either leg may have crossed first). Bullish: CE at ATM or "
-             f"1 strike ITM above, PE at ATM ±1 strike below; bearish the other way. Both legs must have touched their "
+    itm = getattr(config, "BEP_CROSS_ITM_STRIKES", 2)
+    ui.label(f"5-min candles, ATM = strike nearest NIFTY's close. A row = on this candle one leg closed ABOVE its BEP (the "
+             f"one to BUY) and the opponent closed BELOW its BEP, for the first time (either leg may have crossed first). "
+             f"Buy CE: the CE at ATM or up to {itm} strikes ITM, the opponent PE at ATM ±1 strike; Buy PE the other way. "
+             f"Both legs must have touched their "
              f"BEP (±{tol:g}) on this candle or the {n_touch - 1} before. Watched 30 min: FAILED if the leg above closes "
              f"below its BEP or the leg below closes above its BEP, else HELD. Live signals alert and are added to "
              f"Order Management > Pair (prices = BEPs, buffer 0). Independent of the Support board / ⭐.") \
         .classes("text-xs opacity-70")
     for name in engine.active():
+        step = config.INDEXES[name]["strike_interval"]
+        with ui.card().classes("w-full py-2"):
+            with ui.row().classes("items-end gap-4"):
+                ui.icon("help_outline").classes("text-xl text-blue-5 self-center")
+                ui.label("Why no row?").classes("text-sm font-bold self-center")
+                w_ce = ui.number("CE strike", value=centre_strike(name), step=step, precision=0).classes("w-28")
+                w_pe = ui.number("PE strike", value=centre_strike(name), step=step, precision=0).classes("w-28")
+                w_t = ui.input("Candle (HH:MM)", value="09:40").classes("w-32")
+
+                async def check(name=name, w_ce=w_ce, w_pe=w_pe, w_t=w_t):
+                    try:
+                        ce, pe = int(w_ce.value), int(w_pe.value)
+                    except (TypeError, ValueError):
+                        ui.notify("Enter the CE and PE strikes.", type="negative")
+                        return
+                    lines = await engine.explain_cross(name, ce, pe, w_t.value or "")
+                    day = engine.replay_date or "today"
+                    with ui.dialog() as dlg, ui.card().classes("min-w-[560px]"):
+                        ui.label(f"{ce}CE / {pe}PE · {w_t.value} candle · {day}").classes("text-md font-bold")
+                        for ok, text in lines:
+                            icon, colour = {True: ("check_circle", "text-green-5"), False: ("cancel", "text-red-5")} \
+                                .get(ok, ("info", "text-blue-5"))
+                            with ui.row().classes("items-start gap-2 no-wrap"):
+                                ui.icon(icon).classes(f"text-lg {colour}")
+                                ui.label(text).classes("text-sm")
+                        ui.button("Close", on_click=dlg.close).props("flat")
+                    dlg.open()
+                ui.button("Check", icon="search", on_click=check).props("dense no-caps")
+                ui.label("Checks one CE / PE pair on one candle of the day shown (today or the replayed day) "
+                         "against every rule.").classes("text-xs opacity-60 self-center")
         with ui.card().classes("w-full"):
             card_title(f"{name} — BEP Pair cross", "call_split")
             t = ui.table(columns=CROSS_COLUMNS, rows=[], row_key="id").classes("w-full").props("dense flat") \
@@ -516,7 +548,8 @@ def pair_cross_page():
             t.add_slot("body", """
                 <q-tr :props="props" :style="props.row.bg ? {backgroundColor: props.row.bg, color: props.row.fg} : {}">
                   <q-td v-for="col in props.cols" :key="col.name" :props="props">
-                    <span :class="col.name === 'status' || col.name === 'up' || col.name === 'dn' ? 'text-weight-bold' : ''">{{ col.value }}</span>
+                    <q-badge v-if="col.name === 'dir'" :color="props.row.buy === 'CE' ? 'green-8' : 'red-8'">{{ col.value }}</q-badge>
+                    <span v-else :class="col.name === 'status' || col.name === 'up' ? 'text-weight-bold' : ''">{{ col.value }}</span>
                     <q-tooltip v-if="col.name === 'status' && props.row.why">{{ props.row.why }}</q-tooltip>
                   </q-td>
                 </q-tr>""")
@@ -530,16 +563,15 @@ def pair_cross_page():
                 lu = engine.option_ltp.get((name, up["strike"], up["opt"])) if live and r["status"] == "watching" else None
                 ld = engine.option_ltp.get((name, dn["strike"], dn["opt"])) if live and r["status"] == "watching" else None
                 pu = (lu if lu is not None else up["last"]) - up["close"]
-                pd = dn["close"] - (ld if ld is not None else dn["last"])
                 bg, fg = {"failed": SUPPORT_RED, "held": CROSS_HELD}.get(r["status"], SUPPORT_HELD)
                 rows.append({
-                    "id": r["id"], "time": r["time"], "dir": "↑ CE" if r["dir"] == "up" else "↓ PE",
+                    "id": r["id"], "time": r["time"], "dir": f"Buy {up['opt']}", "buy": up["opt"],
                     "atm": f"{r['nifty']:.2f} · {r['atm']}" if r["nifty"] is not None else f"-- · {r['atm']}",
                     "up": f"{up['strike']}{up['opt']}  BEP {up['bep']:.2f} · {up['close']:.2f}",
                     "dn": f"{dn['strike']}{dn['opt']}  BEP {dn['bep']:.2f} · {dn['close']:.2f}",
                     "ltp": (f"{lu:.2f} · {ld:.2f}" if lu is not None and ld is not None
                             else f"close {up['last']:.2f} · {dn['last']:.2f}"),
-                    "pts": f"{pu:+.2f} · {pd:+.2f}", "best": f"{r['best_up']:+.2f} · {r['best_dn']:+.2f}",
+                    "pts": f"{pu:+.2f}", "best": f"{r['best_up']:+.2f}",
                     "status": mon.cross.status_text(r), "why": r.get("fail_why") or "",
                     "also": ", ".join(r["also"]), "bg": bg, "fg": fg,
                 })
