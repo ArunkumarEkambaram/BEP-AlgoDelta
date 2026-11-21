@@ -21,6 +21,7 @@ import limit_orders
 import market_utils
 import notifier
 import order_bridge
+import replay
 import settings_store
 import trade_tracker
 import upstox_client
@@ -49,6 +50,10 @@ class Engine:
         config.AUTO_ORDER_DRY_RUN = True                     # always start in Dry run
         self.client = upstox_client.UpstoxClient(config.UPSTOX_ACCESS_TOKEN)
         self.monitors = {n: BepMonitor(n) for n in config.INDEXES}
+        self.replays = {}                                   # index -> replay BepMonitor (BEP Support "Replay")
+        self.replay_info = ""
+        self.replay_date = ""
+        self.replay_busy = False
         self.watches = {n: CommonWatch(n) for n in config.INDEXES}
         for w in self.watches.values():
             w.load()
@@ -62,7 +67,8 @@ class Engine:
         self.log_lines = []
         self.events = []                                     # (seq, {"msg", "type", "title"})
         self.event_seq = 0
-        self.versions = {k: 0 for k in ("board", "cards", "watch", "orders", "plan", "log", "settings", "bep")}
+        self.versions = {k: 0 for k in ("board", "cards", "watch", "orders", "plan", "log", "settings", "bep",
+                                                 "cross", "replay")}
         self.bep_upload_text = {n: "" for n in config.INDEXES}
         self.scan_timer = None
         self._scan_busy = False
@@ -420,6 +426,10 @@ class Engine:
                     wanted.update({(name, r["ce_strike"], "CE"), (name, r["pe_strike"], "PE")})
                 elif r.get("strike") is not None:
                     wanted.add((name, int(r["strike"]), r["opt"]))
+        for name in self.active():                   # BEP Pair cross rows still being watched
+            for c in self.monitors[name].cross.rows:
+                if c["status"] == "watching":
+                    wanted.update({(name, c["up"]["strike"], c["up"]["opt"]), (name, c["dn"]["strike"], c["dn"]["opt"])})
         for o in self.order_log:                     # limit orders / app trails keep their live LTP without a card
             m = limit_orders.parse(o.get("mg"))
             if o.get("index") in self.monitors and ((m and limit_orders.pending(m)) or self.is_open(o)):
@@ -726,6 +736,67 @@ class Engine:
                 cw.save()
             self.bump("watch", "orders")
 
+    # ------------------------------------------------------------------ BEP Support replay (replay.py)
+    def view_monitor(self, name):
+        """The monitor the BEP Support pages show: the replayed past day, else the live one."""
+        return self.replays.get(name) or self.monitors[name]
+
+    async def run_replay(self, date_str: str, bep_source: str) -> str:
+        """Rebuilds the Support board + BEP Pair cross of a past day. Returns an error text, or "" when done."""
+        if not self.connected:
+            return "Connect to Upstox first (Setup)."
+        if self.replay_busy:
+            return "A replay is already running."
+        self.replay_busy = True
+        self.bump("replay")
+        try:
+            out = {}
+            for name in self.active():
+                mon, info, err = await run.io_bound(replay.build, self.client, name, date_str, bep_source,
+                                                    self.monitors[name].expiry)
+                if err:
+                    self.log(f"{name} replay {date_str}: {err}")
+                    return err
+                for msg in getattr(mon, "replay_logs", []):
+                    self.log(f"{name} replay: {msg}")
+                out[name] = (mon, info)
+            self.replays = {n: m for n, (m, _i) in out.items()}
+            self.replay_date = date_str
+            self.replay_info = " | ".join(i for _m, i in out.values())
+            self.log(self.replay_info)
+            return ""
+        except Exception as ex:
+            self.log(f"Replay {date_str} error: {ex}")
+            return str(ex)
+        finally:
+            self.replay_busy = False
+            self.bump("replay", "board", "cross")
+
+    def stop_replay(self):
+        self.replays, self.replay_info, self.replay_date = {}, "", ""
+        self.bump("replay", "board", "cross")
+
+    def _cross_signals(self, name, signals) -> bool:
+        """Live BEP Pair cross signals: alert (unless paused) and add a TRIGGERED Pair row to Order Management."""
+        added = False
+        for sig in signals or []:
+            label = notifier.cross_label(sig)
+            self.log(label)
+            if config.ALERTS_PAUSED:
+                self.log("Alerts paused: BEP Pair cross alert not shown.")
+            else:
+                self.notify(label, "positive", f"{name} BEP Pair cross {sig['up']['strike']}{sig['up']['opt']}")
+            if not getattr(config, "BEP_CROSS_ADD_PAIR", True):
+                continue
+            row, why = self.watches[name].add_cross_pair(sig)
+            if row:
+                added = True
+                self.log(f"{name} BEP Pair cross {sig['time']} added to Order Management > Pair: "
+                         f"{CommonWatch.pair_title(row)} (buffer 0) - Place order is ready.")
+            else:
+                self.log(f"{name} BEP Pair cross {sig['time']} not added to Order Management: {why}.")
+        return added
+
     def _add_star_rows(self, name, events) -> bool:
         mon, cw, added = self.monitors[name], self.watches[name], False
         for e in events or []:
@@ -795,6 +866,10 @@ class Engine:
                                 self.notify(label, "positive", f"{e.get('index', name)} BEP Support {e['opt']}")
                     star_added = self._add_star_rows(name, alerts)
                     star_failed = self.watches[name].sync_star_failures(mon.support)
+                    if res.get("cross_changed"):
+                        self.bump("cross")
+                    cross_failed = self.watches[name].sync_cross_failures(mon.cross.rows)   # first: frees a
+                    cross_added = self._cross_signals(name, mon.pop_cross_signals())        # failed pair's strikes
 
                     now = _now()
                     before = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
@@ -807,7 +882,7 @@ class Engine:
                         else:
                             self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
                     after = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
-                    if star_added or star_failed or fired or before != after:
+                    if star_added or star_failed or cross_added or cross_failed or fired or before != after:
                         self.bump("watch")
 
                     await self.handle_pair_exits(name)

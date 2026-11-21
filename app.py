@@ -9,14 +9,16 @@ All trading logic runs once in the background engine (engine.py); pages only rea
 matching version number changes.
 """
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from nicegui import app, ui
 
+import bep
 import config
 import exit_rules
 import export_utils
 import limit_orders
+import market_utils
 import order_bridge
 import trade_tracker
 from common_watch import CommonWatch
@@ -53,6 +55,25 @@ BEP_EXPORT_COLUMNS = [
     ("bep", "BEP"), ("time", "Support time"), ("setup", "Setup"), ("fail_level", "Fail level"),
     ("status", "Status"), ("fail_time", "Failed at"), ("fail_close", "Fail close"), ("ltp", "LTP"),
 ]
+CROSS_EXPORT_COLUMNS = [
+    ("index", "Index"), ("time", "Signal candle"), ("direction", "Direction"), ("nifty", "NIFTY close"),
+    ("atm", "ATM"), ("up_leg", "Leg above"), ("up_bep", "Its BEP"), ("up_close", "Its close"),
+    ("dn_leg", "Leg below"), ("dn_bep", "Its BEP "), ("dn_close", "Its close "), ("best_up", "Best move above (pts)"),
+    ("best_dn", "Best move below (pts)"), ("status", "Status"), ("fail_why", "Failed because"), ("also", "Also"),
+]
+CROSS_COLUMNS = [
+    {"name": "time", "label": "Candle", "field": "time", "align": "left"},
+    {"name": "dir", "label": "Dir", "field": "dir", "align": "left"},
+    {"name": "atm", "label": "NIFTY · ATM", "field": "atm", "align": "left"},
+    {"name": "up", "label": "Closed above BEP", "field": "up", "align": "left"},
+    {"name": "dn", "label": "Closed below BEP", "field": "dn", "align": "left"},
+    {"name": "ltp", "label": "LTP above · below", "field": "ltp", "align": "right"},
+    {"name": "pts", "label": "Pts since", "field": "pts", "align": "right"},
+    {"name": "best", "label": "Best", "field": "best", "align": "right"},
+    {"name": "status", "label": "Status", "field": "status", "align": "left"},
+    {"name": "also", "label": "Also", "field": "also", "align": "left"},
+]
+CROSS_HELD = ("rgba(34,197,94,0.14)", "#4ade80")
 SUPPORT_HELD = ("", "")                                   # default table colours (white text in dark mode)
 SUPPORT_RED = ("rgba(239,68,68,0.16)", "#f87171")
 
@@ -64,9 +85,15 @@ OM_SUB = [
     (OM_ROOT + "/bep-star", "star", "BEP Support \u2b50", "star"),
     (OM_ROOT + "/manual-entry", "edit_note", "Manual Entry", "manual"),
 ]
+SUPPORT_ROOT = "/support"
+# BEP Support sub-pages: (path, icon, label, badge key).
+SUPPORT_SUB = [
+    (SUPPORT_ROOT + "/board", "stacked_line_chart", "Support board", "board"),
+    (SUPPORT_ROOT + "/pair-cross", "call_split", "BEP Pair cross", "cross"),
+]
 NAV = [
     ("/", "space_dashboard", "Dashboard"),
-    ("/support", "stacked_line_chart", "BEP Support"),
+    (SUPPORT_ROOT, "stacked_line_chart", "BEP Support"),    # expandable group of SUPPORT_SUB
     (OM_ROOT, "tune", "Order Management"),             # expandable group of OM_SUB
     ("/order-details", "receipt_long", "Order Details"),
     ("/setup", "settings", "Setup"),
@@ -132,7 +159,7 @@ def root():
     ui.run_javascript('if (Notification.permission === "default") { Notification.requestPermission(); }')
     nav_items = {}
     nav_state = {"path": None}
-    om_group = {}
+    groups = {}                                          # root path -> its ui.expansion
 
     def set_active(path):
         nav_state["path"] = path
@@ -140,10 +167,11 @@ def root():
             item.classes(remove="nav-active")
             if p == path:
                 item.classes(add="nav-active")
-        in_om = path.startswith(OM_ROOT)
-        if in_om and not om_group["exp"].value:
-            om_group["exp"].set_value(True)
-        om_group["exp"].props("header-class=" + ("nav-group-active" if in_om else '""'))
+        for root_path, exp in groups.items():
+            inside = path.startswith(root_path)
+            if inside and not exp.value:
+                exp.set_value(True)
+            exp.props("header-class=" + ("nav-group-active" if inside else '""'))
 
     with ui.header().classes("items-center gap-3 px-4 py-2 bg-[#0f172a] text-white border-b border-slate-800"):
         ui.button(icon="menu", on_click=lambda: drawer.toggle()).props("flat round color=white dense")
@@ -187,18 +215,19 @@ def root():
     ui.timer(1.0, refresh_header)
 
     with ui.left_drawer(value=True, bordered=True).props("width=270").classes("pt-4") as drawer:
-        om_badges = {}
+        om_badges, support_badges = {}, {}
         for path, icon, label in NAV:
-            if path == OM_ROOT:
+            if path in (OM_ROOT, SUPPORT_ROOT):
+                subs, badges = (OM_SUB, om_badges) if path == OM_ROOT else (SUPPORT_SUB, support_badges)
                 exp = ui.expansion(label, icon=icon).classes("nav-item").props("dense-toggle")
-                om_group["exp"] = exp
+                groups[path] = exp
 
-                def opened(ev):                          # opening the group goes to its first sub-page
-                    if ev.value and not (nav_state["path"] or "").startswith(OM_ROOT):
-                        ui.navigate.to(OM_SUB[0][0])
+                def opened(ev, root_path=path, first=subs[0][0]):   # opening a group goes to its first sub-page
+                    if ev.value and not (nav_state["path"] or "").startswith(root_path):
+                        ui.navigate.to(first)
                 exp.on_value_change(opened)
                 with exp:
-                    for sub_path, sub_icon, sub_label, kind in OM_SUB:
+                    for sub_path, sub_icon, sub_label, kind in subs:
                         with ui.item(on_click=lambda p=sub_path: ui.navigate.to(p)) \
                                 .classes("nav-item nav-sub cursor-pointer") as item:
                             with ui.item_section().props("avatar").classes("min-w-0 pr-2"):
@@ -206,7 +235,7 @@ def root():
                             with ui.item_section():
                                 ui.label(sub_label).classes("text-sm")
                             with ui.item_section().props("side"):
-                                om_badges[kind] = ui.badge("0").props("rounded color=grey-7")
+                                badges[kind] = ui.badge("0").props("rounded color=grey-7")
                         nav_items[sub_path] = item
                 continue
             with ui.item(on_click=lambda p=path: ui.navigate.to(p)).classes("nav-item cursor-pointer") as item:
@@ -242,6 +271,16 @@ def root():
             badge.props("color=" + ("green-7" if ready else "grey-7"))
     ui.timer(1.0, refresh_om_badges)
 
+    def refresh_support_badges():
+        """Support board: rows today. BEP Pair cross: signals today; green while one is being watched."""
+        mons = [engine.view_monitor(n) for n in engine.active()]
+        support_badges["board"].set_text(str(sum(len(m.support["CE"]) + len(m.support["PE"]) for m in mons)))
+        rows = [r for m in mons for r in m.cross.rows]
+        support_badges["cross"].set_text(str(len(rows)))
+        support_badges["cross"].props("color=" + ("green-7" if any(r["status"] == "watching" for r in rows)
+                                                  else "grey-7"))
+    ui.timer(1.0, refresh_support_badges)
+
     def page(path, builder):
         def build():
             set_active(path)
@@ -250,11 +289,12 @@ def root():
         return build
 
     routes = {path: page(path, b) for path, b in (
-        ("/", dashboard_page), ("/support", support_page),
+        ("/", dashboard_page), (SUPPORT_SUB[0][0], support_page), (SUPPORT_SUB[1][0], pair_cross_page),
         (OM_SUB[0][0], same_strike_page), (OM_SUB[1][0], pair_page), (OM_SUB[2][0], star_page),
         (OM_SUB[3][0], manual_page),
         ("/order-details", orders_page), ("/setup", setup_page), ("/logs", logs_page))}
     routes[OM_ROOT] = page(OM_SUB[0][0], same_strike_page)        # old link: opens Same strike
+    routes[SUPPORT_ROOT] = page(SUPPORT_SUB[0][0], support_page)  # old link: opens the Support board
     ui.sub_pages(routes).classes("w-full")
 
 
@@ -359,26 +399,76 @@ def dashboard_page():
 
 
 # ====================================================================== BEP Support
-def support_page():
+def last_trading_day() -> str:
+    d = datetime.now(market_utils.IST).date() - timedelta(days=1)
+    while not market_utils.is_trading_day(market_utils.IST.localize(datetime(d.year, d.month, d.day, 12))):
+        d -= timedelta(days=1)
+    return d.isoformat()
+
+
+def support_toolbar(title):
+    """Title, Download XLSX (Support board + BEP Pair cross sheets) and the Replay bar of both BEP Support pages."""
     with ui.row().classes("w-full items-center justify-between"):
-        ui.label("BEP Support").classes("text-2xl font-bold")
+        ui.label(title).classes("text-2xl font-bold")
 
         def download_bep_xlsx():
-            rows = []
+            board, cross = [], []
             for n in engine.active():
-                rows.extend(engine.monitors[n].export_rows())
-            if not rows:
+                mon = engine.view_monitor(n)
+                board.extend(mon.export_rows())
+                cross.extend(mon.cross.export_rows())
+            if not board and not cross:
                 ui.notify("No BEP Support rows to export yet", type="warning")
                 return
-            ui.download(export_utils.build_xlsx(rows, BEP_EXPORT_COLUMNS),
-                        f"bep_support_{datetime.now().strftime('%Y-%m-%d')}.xlsx")
+            day = engine.replay_date or datetime.now().strftime('%Y-%m-%d')
+            ui.download(export_utils.build_xlsx_sheets([("Support board", board, BEP_EXPORT_COLUMNS),
+                                                         ("BEP Pair cross", cross, CROSS_EXPORT_COLUMNS)]),
+                        f"bep_support_{day}{'_replay' if engine.replays else ''}.xlsx")
         ui.button("Download XLSX", icon="download", on_click=download_bep_xlsx).props("dense")
+
+    with ui.card().classes("w-full py-2"):
+        with ui.row().classes("w-full items-center gap-4"):
+            ui.icon("history").classes("text-xl text-blue-5")
+            ui.label("Replay a past day").classes("text-sm font-bold")
+            r_date = ui.input("Date", value=engine.replay_date or last_trading_day()).props("dense type=date") \
+                .classes("w-40")
+            r_src = ui.toggle({"csv": "BEP: uploaded CSV", "calc": "BEP: calculated"},
+                              value="csv" if bep.csv_strikes("NIFTY") else "calc").props("dense no-caps")
+            r_src.tooltip("Uploaded CSV = upload THAT day's BEP file on Setup first. Calculated = (CE close + PE close) / 2 "
+                          "of the day before (slower: 2 calls per strike).")
+
+            async def go():
+                run_btn.disable()
+                err = await engine.run_replay(r_date.value or "", r_src.value)
+                run_btn.enable()
+                if err:
+                    ui.notify(err, type="negative", multi_line=True)
+                else:
+                    ui.notify("Replay ready (no alerts, no orders).", type="positive")
+            run_btn = ui.button("Replay", icon="play_arrow", on_click=go).props("dense no-caps")
+            live_btn = ui.button("Back to live", icon="sensors", on_click=engine.stop_replay) \
+                .props("dense no-caps color=green-8")
+            r_info = ui.label("").classes("text-sm font-medium")
+        ui.label("Rebuilds the Support board and BEP Pair cross of that day from Upstox historical candles. "
+                 "No alerts, no ⭐ / Pair rows, no orders; the live scan keeps running. Only days since the last "
+                 "expiry (older contracts are not listed).").classes("text-xs opacity-60")
+
+        def refresh():
+            busy = engine.replay_busy
+            r_info.set_text("Replaying… (reading candles)" if busy else engine.replay_info or "Showing LIVE data")
+            r_info.classes(remove="text-amber-5 text-green-5")
+            r_info.classes(add="text-amber-5" if engine.replays or busy else "text-green-5")
+            live_btn.set_visibility(bool(engine.replays))
+        when_changed(["replay"], refresh, 0.5)
+
+
+def support_page():
+    support_toolbar("BEP Support — Support board")
     ui.label("Each row = a green candle touched BEP (low <= BEP) and closed above it. Red = one of the next 3 candles (15 min) "
-             "closed below the fail level. ⭐ = first support of the day for that strike (alerts, and is added to "
+             "closed below the fail level. ⭐ = first support of the day for that strike, or the first new one after its earlier rows all failed (alerts, and is added to "
              "Order Management when inside the ATM window).").classes("text-xs opacity-70")
 
     for name in engine.active():
-        mon = engine.monitors[name]
         tables = {}
         with ui.row().classes("w-full no-wrap items-start gap-4"):
             for opt in ("CE", "PE"):
@@ -388,15 +478,15 @@ def support_page():
                         .props("dense flat").style("max-height: 70vh; overflow-y: auto")
                     t.add_slot("body", """
                         <q-tr :props="props" :style="props.row.bg ? {backgroundColor: props.row.bg, color: props.row.fg} : {}">
-                          <q-td key="strike" :props="props"><span class="text-weight-bold">{{ props.row.strike }}</span><span v-if="props.row.first" style="margin-left:6px">⭐<q-tooltip>First support of the day for this strike</q-tooltip></span></q-td>
+                          <q-td key="strike" :props="props"><span class="text-weight-bold">{{ props.row.strike }}</span><span v-if="props.row.first" style="margin-left:6px">⭐<q-tooltip>First support for this strike (or the first new one after its earlier rows failed): alerted</q-tooltip></span></q-td>
                           <q-td key="ltp" :props="props">{{ props.row.ltp }}</q-td>
                           <q-td key="bep" :props="props">{{ props.row.bep }}</q-td>
                           <q-td key="time" :props="props">{{ props.row.time }}</q-td>
                         </q-tr>""")
                     tables[opt] = t
 
-        def render(mon=mon, tables=tables):
-            view = mon.board_view()
+        def render(name=name, tables=tables):
+            view = engine.view_monitor(name).board_view()
             for opt, table in tables.items():
                 rows = []
                 for r in view.get(opt, []):
@@ -405,7 +495,62 @@ def support_page():
                     rows.append(row)
                 table.rows = rows
                 table.update()
-        when_changed(["board"], render)
+        when_changed(["board", "replay"], render)
+
+
+def pair_cross_page():
+    support_toolbar("BEP Support — BEP Pair cross")
+    tol, n_touch = getattr(config, "BEP_CROSS_TOUCH_TOL", 1.0), getattr(config, "BEP_CROSS_TOUCH_CANDLES", 3)
+    ui.label(f"5-min candles, ATM = strike nearest NIFTY's close. A row = on this candle one leg closed ABOVE its BEP and "
+             f"the other BELOW its BEP, for the first time (either leg may have crossed first). Bullish: CE at ATM or "
+             f"1 strike ITM above, PE at ATM ±1 strike below; bearish the other way. Both legs must have touched their "
+             f"BEP (±{tol:g}) on this candle or the {n_touch - 1} before. Watched 30 min: FAILED if the leg above closes "
+             f"below its BEP or the leg below closes above its BEP, else HELD. Live signals alert and are added to "
+             f"Order Management > Pair (prices = BEPs, buffer 0). Independent of the Support board / ⭐.") \
+        .classes("text-xs opacity-70")
+    for name in engine.active():
+        with ui.card().classes("w-full"):
+            card_title(f"{name} — BEP Pair cross", "call_split")
+            t = ui.table(columns=CROSS_COLUMNS, rows=[], row_key="id").classes("w-full").props("dense flat") \
+                .style("max-height: 75vh; overflow-y: auto")
+            t.add_slot("body", """
+                <q-tr :props="props" :style="props.row.bg ? {backgroundColor: props.row.bg, color: props.row.fg} : {}">
+                  <q-td v-for="col in props.cols" :key="col.name" :props="props">
+                    <span :class="col.name === 'status' || col.name === 'up' || col.name === 'dn' ? 'text-weight-bold' : ''">{{ col.value }}</span>
+                    <q-tooltip v-if="col.name === 'status' && props.row.why">{{ props.row.why }}</q-tooltip>
+                  </q-td>
+                </q-tr>""")
+
+        def render(name=name, t=t):
+            mon = engine.view_monitor(name)
+            live = not engine.replays
+            rows = []
+            for r in reversed(mon.cross.rows):
+                up, dn = r["up"], r["dn"]
+                lu = engine.option_ltp.get((name, up["strike"], up["opt"])) if live and r["status"] == "watching" else None
+                ld = engine.option_ltp.get((name, dn["strike"], dn["opt"])) if live and r["status"] == "watching" else None
+                pu = (lu if lu is not None else up["last"]) - up["close"]
+                pd = dn["close"] - (ld if ld is not None else dn["last"])
+                bg, fg = {"failed": SUPPORT_RED, "held": CROSS_HELD}.get(r["status"], SUPPORT_HELD)
+                rows.append({
+                    "id": r["id"], "time": r["time"], "dir": "↑ CE" if r["dir"] == "up" else "↓ PE",
+                    "atm": f"{r['nifty']:.2f} · {r['atm']}" if r["nifty"] is not None else f"-- · {r['atm']}",
+                    "up": f"{up['strike']}{up['opt']}  BEP {up['bep']:.2f} · {up['close']:.2f}",
+                    "dn": f"{dn['strike']}{dn['opt']}  BEP {dn['bep']:.2f} · {dn['close']:.2f}",
+                    "ltp": (f"{lu:.2f} · {ld:.2f}" if lu is not None and ld is not None
+                            else f"close {up['last']:.2f} · {dn['last']:.2f}"),
+                    "pts": f"{pu:+.2f} · {pd:+.2f}", "best": f"{r['best_up']:+.2f} · {r['best_dn']:+.2f}",
+                    "status": mon.cross.status_text(r), "why": r.get("fail_why") or "",
+                    "also": ", ".join(r["also"]), "bg": bg, "fg": fg,
+                })
+            t.rows = rows
+            t.update()
+        when_changed(["cross", "replay"], render)
+
+        def tick(name=name, render=render):              # live LTP of watched rows (2 s batch)
+            if not engine.replays and any(r["status"] == "watching" for r in engine.view_monitor(name).cross.rows):
+                render()
+        ui.timer(2.0, tick)
 
 
 # ====================================================================== Order Management (common price + stars)
@@ -1171,6 +1316,9 @@ def order_card(name, r, place, live):
                     ui.badge("Manual entry").props("color=indigo-7")
                 if r.get("kind") == "pair" and r.get("opt"):
                     ui.badge(f"{r['opt']} fired · {CommonWatch.pair_title(r)}").props("color=grey-8")
+                if r.get("auto") == "cross":
+                    ui.badge(f"BEP cross {r.get('trig_time', '')}").props("color=teal-8") \
+                        .tooltip("Added automatically by BEP Support > BEP Pair cross (prices = BEPs, buffer 0)")
             with ui.row().classes("items-center gap-2 no-wrap"):
                 chip = ui.badge(state).props(f"color={_chip_colour(state)}").classes("text-sm px-2 py-1")
                 if order is not None and (engine.is_open(order) or str(order.get("sq") or "").startswith("FAILED")) \

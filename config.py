@@ -65,6 +65,12 @@ SUPPORT_FAIL_WINDOW_CANDLES = 3
 # many candles after the validate candle (3 = 15 minutes). 0 = no expiry.
 SUPPORT_SETUP_EXPIRY_CANDLES = 3
 
+# BEP Pair cross (BEP Support > BEP Pair cross, pair_cross.py): a CE and a PE near ATM split around their BEPs.
+BEP_CROSS_TOUCH_TOL = 1.0         # a leg "touched" its BEP when low <= BEP + this and high >= BEP - this
+BEP_CROSS_TOUCH_CANDLES = 3       # the touch must be on the signal candle or the 2 candles before it
+BEP_CROSS_WATCH_CANDLES = 6       # watched for 6 candles (30 min) after the signal: HELD or FAILED
+BEP_CROSS_ADD_PAIR = True         # a live signal also adds a TRIGGERED Pair row to Order Management (buffer 0)
+
 # ---------------------------------------------------------------- ALGO DELTA ORDERS
 AUTO_ORDER_DRY_RUN = True         # "Dry run" checkbox. True = log the JSON only, send nothing.
 AUTO_ORDER_PAUSED = False         # "Pause algo trade" button.

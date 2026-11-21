@@ -8,6 +8,7 @@ import config
 import market_utils
 import support_logic
 import bep
+import pair_cross
 
 CANDLE_MINUTES = 5
 CANDLE = timedelta(minutes=CANDLE_MINUTES)
@@ -36,12 +37,15 @@ class BepMonitor:
         
         self.first_start = None
         self.first_found = {"CE": None, "PE": None}
+        self.first_found_start = {"CE": None, "PE": None}
         self.first_view = {}
         
         self.latest_view = {}
         self._latest_sig = None
 
         self.candle_windows = {}
+        self.candle_atm = {}         # candle start -> ATM strike (nearest to NIFTY's close of that candle)
+        self.nifty_close = {}        # candle start -> NIFTY close
         self.new_support = []
         self._notified = set()
         
@@ -52,6 +56,21 @@ class BepMonitor:
         self._plan_skip_logged = None
         self._far_logged = set()     # (date, strike, opt) already logged as "too far above BEP"
         self.new_orders = []         # signals waiting to be sent
+        self.replay = False          # True = a past day rebuilt from historical candles: no alerts, no quotes
+        self.bep_fn = None
+        self.scan_all_csv = None     # None = config.SUPPORT_SCAN_ALL_CSV_STRIKES
+        self.cross = pair_cross.PairCross(name, self.cfg["strike_interval"])   # BEP Pair cross table
+        self.new_cross = []          # live pair-cross signals waiting for the engine (alert + Pair row)
+        self._step_cache = {}
+
+    def _scan_all(self) -> bool:
+        return config.SUPPORT_SCAN_ALL_CSV_STRIKES if self.scan_all_csv is None else self.scan_all_csv
+
+    def get_bep(self, client, strike):
+        """BEP of a strike: the uploaded CSV, else calculated. Replay mode swaps in its own lookup (bep_fn)."""
+        if self.bep_fn:
+            return self.bep_fn(client, strike)
+        return bep.get_bep(client, self.expiry, strike, self.name)
 
     def _reset_leg_state(self, strike, opt):
         self.leg_states[(strike, opt)] = support_logic.new_leg_state()
@@ -63,13 +82,17 @@ class BepMonitor:
 
     def _reset_support(self):
         self.support = {"CE": [], "PE": []}
+        self.cross.reset()
         self.leg_states = {}
         self.latest_view = {}
         self._latest_sig = None
         self.candle_windows = {}
+        self.candle_atm = {}
+        self.nifty_close = {}
         
         self.first_start = None
         self.first_found = {"CE": None, "PE": None}
+        self.first_found_start = {"CE": None, "PE": None}
         self.first_view = {}
 
     def force_recalc(self):
@@ -98,6 +121,11 @@ class BepMonitor:
         self._schedule(client, now, log_fn)
         if self._process(client, now, log_fn):
             result["board_changed"] = True
+        try:
+            result["cross_changed"] = self._cross_step(client, now, log_fn)
+        except Exception as ex:
+            result["cross_changed"] = False
+            log_fn(f"BEP {self.name} pair cross error: {ex}")
             
         try:
             result["first_updated"] = self._update_first(client, result["recalculated"] or result["board_changed"], log_fn)
@@ -222,7 +250,8 @@ class BepMonitor:
         if quotes is None:
             log_fn(f"BEP {self.name} opening check: quote fetch failed: {err}")
             return
-        max_above = float(config.AUTO_ORDER.get(self.name, {}).get("max_above_bep", 15) or 15)
+        raw = config.AUTO_ORDER.get(self.name, {}).get("max_above_bep", 15)
+        max_above = 15.0 if raw is None or raw == "" else float(raw)          # 0 = no limit
         candidates = {opt: [] for opt in open_sides}
         for (strike, opt), leg in legs.items():
             q = quotes.get(leg["ik"]) or quotes.get(leg["ik"].replace("|", ":")) or {}
@@ -236,7 +265,7 @@ class BepMonitor:
             level = leg["bep"]
             if not (seen_low <= level + support_logic.TOL and ltp > o and ltp > level):
                 continue
-            if ltp - level >= max_above:
+            if max_above > 0 and ltp - level >= max_above:
                 if key not in self._far_logged:
                     self._far_logged.add(key)
                     log_fn(f"BEP {self.name} opening candle: {opt} {strike} skipped - LTP {ltp:.2f} is "
@@ -318,12 +347,16 @@ class BepMonitor:
             
             window_strikes = market_utils.build_strike_window(nifty_close, self.cfg["strike_interval"]) if nifty_close else list(self.strikes)
             self.candle_windows[s] = set(window_strikes)
+            self.candle_atm[s] = window_strikes[len(window_strikes) // 2]
+            if nifty_close:
+                self.nifty_close[s] = nifty_close
             
             if s == first_of_day:
                 self.first_start = s
                 
             strikes_to_scan = window_strikes
-            if config.SUPPORT_SCAN_ALL_CSV_STRIKES or self.first_found["CE"] is None or self.first_found["PE"] is None:
+            if self._scan_all() or (self.scan_all_csv is None and (self.first_found["CE"] is None
+                                                                   or self.first_found["PE"] is None)):
                 csv_strikes = bep.csv_strikes(self.name)
                 if csv_strikes:
                     strikes_to_scan = sorted(set(window_strikes) | csv_strikes)
@@ -357,6 +390,7 @@ class BepMonitor:
         cache = {}
         give_up = timedelta(seconds=config.TRACK_GIVE_UP_SECONDS)
         self._prefetch(client, cache)
+        self._step_cache = cache
         
         for start in sorted(self.buckets):
             b = self.buckets[start]
@@ -382,6 +416,10 @@ class BepMonitor:
                             changed = True
             
             if len(b["done"]) >= 2 * len(b["strikes"]) or now >= end + give_up:
+                for strike in b["strikes"]:                 # legs given up on: their sequence is broken
+                    for opt in ("CE", "PE"):
+                        if (strike, opt) not in b["done"] and (strike, opt) in self.leg_states:
+                            self._reset_leg_state(strike, opt)
                 if start in self.buckets:
                     del self.buckets[start]
         return changed
@@ -393,26 +431,31 @@ class BepMonitor:
 
         if candle is None:
             if any(c[0][:16] > start_key for c in candles):
+                self._reset_leg_state(strike, opt)       # a missing candle breaks the flush/validate sequence
                 return True
             return False
 
-        level, _src = bep.get_bep(client, self.expiry, strike, self.name)
+        level, _src = self.get_bep(client, strike)
         if level is None:
+            self._reset_leg_state(strike, opt)
             return True
 
         o, h, l, c = float(candle[1]), float(candle[2]), float(candle[3]), float(candle[4])
 
-        if self.first_found[opt] is None:
-            if l <= level + 0.05 and c > level and c > o:
-                self.first_found[opt] = strike
-                self.first_view = {}
-
-        changed = support_logic.check_failures(self.support[opt], strike, start, c, label)
-
         window = self.candle_windows.get(start)
         if window is None:
             window = set(self.strikes or [])
-        if not config.SUPPORT_SCAN_ALL_CSV_STRIKES and window and strike not in window:
+
+        if (not window or strike in window) and l <= level + support_logic.TOL and c > level and c > o:
+            cur, atm = self.first_found[opt], self.candle_atm.get(start)
+            if cur is None or (self.first_found_start[opt] == start and atm is not None
+                               and abs(strike - atm) < abs(cur - atm)):
+                self.first_found[opt] = strike          # first support inside the ATM window; tie -> nearest ATM
+                self.first_found_start[opt] = start
+                self.first_view = {}
+
+        changed = support_logic.check_failures(self.support[opt], strike, start, c, label)
+        if not self._scan_all() and window and strike not in window:
             return "changed" if changed else True
 
         if (strike, opt) not in self.leg_states:
@@ -427,17 +470,20 @@ class BepMonitor:
 
     def _add_support(self, strike, opt, start, label, level, close, fail_low, rule, now):
         self._support_seq += 1
-        is_first = not any(r["strike"] == strike for r in self.support[opt])
+        # alert (and a \u2b50 row) for the first support of a strike, and again once every earlier row on it failed
+        is_first = not any(r["strike"] == strike and r["state"] == "green" for r in self.support[opt])
         row = {
             "id": self._support_seq, "strike": strike, "opt": opt, "bep": level,
             "time": label, "start": start, "fail_time": None, "state": "green", "ltp": close,
-            "resolved": False, "active_flush_low": fail_low, "rule": rule, "close": close,
+            "resolved": False, "active_flush_low": fail_low, "rule": rule, "close": close, "star": is_first,
         }
         self.support[opt].append(row)
         if is_first:
             self._queue_support_alert(row, start, now)
 
     def _queue_support_alert(self, row, start, now):
+        if self.replay:
+            return
         try:
             key = (start.strftime("%Y-%m-%d"), row["strike"], row["opt"], row["time"])
             age = now - (start + CANDLE)
@@ -455,6 +501,70 @@ class BepMonitor:
                 })
         except Exception:
             pass
+
+    # ------------------------------------------------------------------ BEP Pair cross (pair_cross.py)
+    def _cross_step(self, client, now, log_fn) -> bool:
+        """Runs the pair-cross check on every closed candle not yet processed (in time order). Candles come
+        from this step's board cache; a leg missing from it is fetched once. Returns True if the table changed."""
+        latest = self._latest_closed(now)
+        if latest is None:
+            return False
+        first = latest.replace(hour=SESSION_FIRST_CANDLE.hour, minute=SESSION_FIRST_CANDLE.minute)
+        s = first if self.cross.last_start is None else self.cross.last_start + CANDLE
+        if s > latest:
+            return False
+        mapping, _ = market_utils.option_instrument_keys(client, self.expiry, self.cfg["underlying_key"])
+        mapping = mapping or {}
+        cache = self._step_cache
+        give_up = timedelta(seconds=config.TRACK_GIVE_UP_SECONDS)
+        changed = False
+        while s <= latest:
+            if s not in self.candle_windows:            # NIFTY close / window of this candle not scheduled yet
+                break
+            atm = self.candle_atm.get(s)
+            legs = self.cross.needed_legs(atm)
+            iks = {leg: mapping.get(leg[0], {}).get(leg[1]) for leg in legs}
+            missing = [ik for ik in iks.values() if ik and ik not in cache]
+            if missing:
+                def fetch(ik):
+                    candles, _ = client.fetch_intraday_candles(ik, CANDLE_MINUTES)
+                    return ik, candles or []
+                with ThreadPoolExecutor(max_workers=FETCH_WORKERS) as ex:
+                    for ik, candles in ex.map(fetch, missing):
+                        cache[ik] = candles
+            key = s.strftime("%Y-%m-%dT%H:%M")
+            waiting = any(ik and not any(c[0][:16] >= key for c in cache.get(ik, [])) for ik in iks.values())
+            if waiting and now < s + CANDLE + give_up:
+                break                                   # a needed candle has not arrived yet: try next scan
+
+            def candle_of(strike, opt, start, mapping=mapping, cache=cache):
+                ik = mapping.get(strike, {}).get(opt)
+                k = start.strftime("%Y-%m-%dT%H:%M")
+                c = next((c for c in cache.get(ik, []) if c[0][:16] == k), None) if ik else None
+                if c is None and ik and ik not in cache:
+                    candles, _ = client.fetch_intraday_candles(ik, CANDLE_MINUTES)
+                    cache[ik] = candles or []
+                    c = next((c for c in cache[ik] if c[0][:16] == k), None)
+                return (float(c[1]), float(c[2]), float(c[3]), float(c[4])) if c else None
+
+            def bep_of(strike):
+                return self.get_bep(client, strike)[0]
+
+            before = [(r["id"], r["status"], r["n"]) for r in self.cross.rows]
+            new = self.cross.process(s, atm, self.nifty_close.get(s), candle_of, bep_of)
+            if new or before != [(r["id"], r["status"], r["n"]) for r in self.cross.rows]:
+                changed = True
+            for r in new:
+                age = now - (s + CANDLE)
+                if not self.replay and timedelta(seconds=-30) <= age <= NOTIFY_MAX_AGE \
+                        and market_utils.is_market_open(now):
+                    self.new_cross.append(dict(r))
+            s += CANDLE
+        return changed
+
+    def pop_cross_signals(self) -> list:
+        out, self.new_cross = self.new_cross, []
+        return out
 
     def pop_support_alerts(self) -> list:
         out, self.new_support = self.new_support, []
@@ -478,7 +588,7 @@ class BepMonitor:
                     first_id[e["strike"]] = ((e["start"], e["id"]), e["id"])
             out[opt] = [{
                 "id": str(e["id"]), "strike": str(e["strike"]),
-                "first": first_id[e["strike"]][1] == e["id"], "ltp": f"{e['ltp']:.2f}" if e.get("ltp") else "--",
+                "first": e.get("star", first_id[e["strike"]][1] == e["id"]), "ltp": f"{e['ltp']:.2f}" if e.get("ltp") else "--",
                 "bep": f"{e['bep']:.2f}",
                 "time": f"{e['time']} → {e['fail_time']}" if e['state'] == 'red' and e.get('fail_time') else e['time'],
                 "kind": e["state"],
@@ -499,7 +609,7 @@ class BepMonitor:
                 rows.append({
                     "_sort": (e["start"], 0 if opt == "CE" else 1, e["strike"]),
                     "index": self.name, "opt": opt, "strike": e["strike"],
-                    "first": "Yes" if first[(opt, e["strike"])] == (e["start"], e["id"]) else "",
+                    "first": "Yes" if e.get("star", first[(opt, e["strike"])] == (e["start"], e["id"])) else "",
                     "bep": round(e["bep"], 2), "time": e["time"],
                     "setup": "Failed breakdown" if e.get("rule") == 1 else "Touch and go",
                     "fail_level": round(e["active_flush_low"], 2) if e.get("active_flush_low") is not None else "",
@@ -535,7 +645,7 @@ class BepMonitor:
                 continue
 
             strike = found
-            level, _ = bep.get_bep(client, self.expiry, strike, self.name)
+            level, _ = self.get_bep(client, strike)
             ltp = (self.quotes.get(strike) or {}).get(opt)
             if ltp is None:
                 ik = mapping.get(strike, {}).get(opt)

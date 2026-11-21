@@ -159,6 +159,46 @@ class CommonWatch:
             self.save()
         return changed
 
+    def add_cross_pair(self, sig: dict, now=None):
+        """Adds a TRIGGERED Pair row from a live BEP Pair cross signal (pair_cross.py): CE / PE price = each leg's
+        BEP, buffer 0, 5 min, the leg that closed above is the fired leg. Later candles are checked by the normal
+        Pair rules (opponent closing at or above its BEP = FAILED before ordering / opponent SL after).
+        Returns (row, None) or (None, reason) when a Pair row with the same strikes is still open."""
+        now = now or datetime.now(IST)
+        self._roll_day(now)
+        up, dn = sig["up"], sig["dn"]
+        ce, pe = (up, dn) if up["opt"] == "CE" else (dn, up)
+        for r in self.rows:
+            if r.get("kind") == "pair" and r["ce_strike"] == ce["strike"] and r["pe_strike"] == pe["strike"] \
+                    and r["status"] in ("watching", "triggered"):
+                return None, f"Pair {ce['strike']}CE / {pe['strike']}PE is already open (row {r['id']})"
+        row = self.add_pair(ce["strike"], pe["strike"], ce["bep"], pe["bep"], 0.0, 5, now=now)
+        done = sig["start"].isoformat()
+        for o, leg in (("CE", ce), ("PE", pe)):
+            row["legs"][o].update(prev_close=leg["close"], last_close=leg["close"], last_done=done, armed=True)
+        row.update(status="triggered", baseline=done, auto="cross", cross_id=sig["id"], opt=up["opt"],
+                   strike=up["strike"], price=up["bep"], trig_time=sig["time"], trig_close=up["close"],
+                   last_close=up["close"], last_time=sig["time"])
+        self.save()
+        return row, None
+
+    def sync_cross_failures(self, cross_rows: list) -> bool:
+        """Marks BEP-cross Pair rows that are not ordered yet FAILED when their pair-cross table row failed."""
+        by_id = {c["id"]: c for c in cross_rows}
+        changed = False
+        for r in self.rows:
+            if r.get("auto") != "cross" or r["status"] != "triggered" \
+                    or r.get("order_status") in ("SENT", "DRY RUN", "sending"):
+                continue
+            c = by_id.get(r.get("cross_id"))
+            if c and c["status"] == "failed":
+                r.update(status="failed", fail_time=c["fail_time"], fail_close=c.get("fail_close"),
+                         fail_why=c["fail_why"])
+                changed = True
+        if changed:
+            self.save()
+        return changed
+
     def add_pair(self, ce_strike: int, pe_strike: int, ce_price: float, pe_price: float, buffer: float, tf: int,
                  now=None, mode: str = None, trig_on: str = "close") -> dict:
         now = now or datetime.now(IST)
@@ -470,7 +510,11 @@ class CommonWatch:
                 return "Watching both legs \u00b7 " + CommonWatch.armed_text(r)
             text = (f"{r['opt']} LTP above at {r['trig_time']}, LTP {r['trig_close']:.2f}" if r.get("trig_how") == "ltp"
                     else f"{r['opt']} closed above at {r['trig_time']}, close {r['trig_close']:.2f}")
-            if r["status"] == "failed":
+            if r.get("auto") == "cross":
+                text = f"BEP cross {r['trig_time']}: {r['opt']} closed {r['trig_close']:.2f} above BEP"
+            if r["status"] == "failed" and r.get("fail_why"):
+                text += f" \u2192 failed at {r['fail_time']}: {r['fail_why']}"
+            elif r["status"] == "failed":
                 text += f" \u2192 failed: {opp} closed {r['fail_close']:.2f} at {r['fail_time']}"
             elif r["status"] == "exited":
                 text += (f" \u2192 opponent SL: {opp} closed {r['opp_close']:.2f} at {r['fail_time']}"
