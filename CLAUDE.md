@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #32; PR #33 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #33; PR #34 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -245,8 +245,25 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 and #33: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
-- **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #34: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
+  - **What it says:**
+    - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
+    - Algo providers giving static IPs to other retail clients is a violation. Brokers must take an **undertaking** from each tech-savvy client (own algos; **no recourse to the exchange grievance mechanism** for losses from the algo logic).
+    - Penalties: brokers ₹5,000 per client (max ₹1 lakh, escalating); algo providers' **empanelment may be suspended or revoked**.
+    - It repeats (NSE/INVG/69255, Annexure I, Para 14): a tech-savvy client must host the algo **"using a static IP at their end where Algo logic resides"**.
+  - **Impact on this app:**
+    - The user writes their own algo (this app), so they fit "tech-savvy" in substance.
+    - But the static IP is **AlgoDelta's** (the ₹400/month add-on), not at the user's end. That's the model the circular targets.
+    - AlgoDelta's future is **uncertain**: it may comply (undertakings via the broker), restrict or withdraw the static-IP add-on, or face suspension. Not legal advice.
+  - **Decided / advised:**
+    - **Setup C (cloud server with the user's own static IP + Upstox direct)** now also reduces regulatory and dependency risk, not only adds features. Phase 1 (cloud + AlgoDelta) may be skipped if the answers aren't clear.
+    - Avoid new features that only work through AlgoDelta (e.g. relying on `cancel_order` / `limit_order` behaviour).
+    - **Questions drafted** for the user to send (21 Nov 2026):
+      - **AlgoDelta:** compliance and empanelment; will the static IP add-on continue (date, notice); is "algo on my PC + AlgoDelta's IP" accepted; who collects the undertaking; will webhooks keep working; algo ID / registration / order-per-second limit; refund; what happens to open positions and pending SL/Target if suspended.
+      - **Upstox:** how to register as a tech-savvy retail client and the undertaking text; algo registration and the order-per-second threshold; registering a cloud static IP (AWS Elastic IP / Lightsail, Mumbai), how many and how to change; which order APIs are allowed (place/modify/cancel by ID, SL/SL-M, GTT, single-position exit); which calls don't need the IP; charges; rate limits; moving off the third-party platform; emergency exit if it stops.
+    - **Waiting on the user:** the replies from AlgoDelta and Upstox. When they arrive, turn them into the cloud server + Upstox direct plan.
+- **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this; **priority raised by NSE Circular 58/2026**, see above):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
     - **A (today):** PC → AlgoDelta → Upstox.
@@ -267,5 +284,5 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     1. Cloud + keep AlgoDelta.
     2. Build Upstox direct **alongside** AlgoDelta, with a Setup switch "AlgoDelta / Upstox direct"; test with 1 lot.
     3. Drop AlgoDelta once direct is proven.
-  - **Next step when resumed:** write up the questions for Phase 1 (cloud hosting) or the Upstox direct module, as the user chooses.
+  - **Next step when resumed:** read the AlgoDelta / Upstox replies to the circular questions, then write up the questions for the cloud server and the Upstox direct module.
 - **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now); the **Upstox WebSocket market feed** (prices pushed in real time instead of the 2 s polling; read-only, no static IP; medium effort, later).
