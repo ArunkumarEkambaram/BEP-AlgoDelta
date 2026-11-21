@@ -62,6 +62,7 @@ class BepMonitor:
         self.cross = pair_cross.PairCross(name, self.cfg["strike_interval"])   # BEP Pair cross table
         self.new_cross = []          # live pair-cross signals waiting for the engine (alert + Pair row)
         self._step_cache = {}
+        self._client = None          # the client of the last step (live or replay), for explain_cross
 
     def _scan_all(self) -> bool:
         return config.SUPPORT_SCAN_ALL_CSV_STRIKES if self.scan_all_csv is None else self.scan_all_csv
@@ -100,6 +101,7 @@ class BepMonitor:
         self.last_recalc = None
 
     def step(self, client, index_ltp: float, expiry_hint, now) -> dict:
+        self._client = client
         logs = []
         log_fn = logs.append
         result = {"board_changed": False, "recalculated": False, "first_updated": False,
@@ -561,6 +563,37 @@ class BepMonitor:
                     self.new_cross.append(dict(r))
             s += CANDLE
         return changed
+
+    def explain_cross(self, ce_strike: int, pe_strike: int, hhmm: str) -> list:
+        """BEP Pair cross "Why no row?": checks one CE / PE pair on one candle (start time HH:MM) of the day
+        this monitor shows (today, or the replayed day). Returns [(ok, text)] (see PairCross.explain)."""
+        client = self._client
+        if client is None or not self.candle_windows:
+            return [(False, "No candles scanned yet (not connected, market not open yet, or no replay).")]
+        try:
+            h, m = (int(x) for x in hhmm.strip().split(":"))
+        except (ValueError, AttributeError):
+            return [(False, "Enter the candle time as HH:MM, e.g. 09:40.")]
+        if m % CANDLE_MINUTES or not (SESSION_FIRST_CANDLE <= dtime(h, m) <= SESSION_LAST_CANDLE):
+            return [(False, f"Use a 5-min candle start between 09:15 and 15:25 (e.g. 09:40), not {hhmm}.")]
+        start = min(self.candle_windows).replace(hour=h, minute=m)
+        if start not in self.candle_windows:
+            return [(False, f"The {hhmm} candle has not been scanned yet.")]
+        mapping, _ = market_utils.option_instrument_keys(client, self.expiry, self.cfg["underlying_key"])
+        mapping, cache = mapping or {}, {}
+
+        def candle_of(strike, opt, st):
+            ik = mapping.get(strike, {}).get(opt)
+            if not ik:
+                return None
+            if ik not in cache:
+                cache[ik] = self._step_cache.get(ik) or client.fetch_intraday_candles(ik, CANDLE_MINUTES)[0] or []
+            k = st.strftime("%Y-%m-%dT%H:%M")
+            c = next((c for c in cache[ik] if c[0][:16] == k), None)
+            return (float(c[1]), float(c[2]), float(c[3]), float(c[4])) if c else None
+
+        return self.cross.explain(int(ce_strike), int(pe_strike), start, self.candle_atm.get(start),
+                                  self.nifty_close.get(start), candle_of, lambda k: self.get_bep(client, k)[0])
 
     def pop_cross_signals(self) -> list:
         out, self.new_cross = self.new_cross, []
