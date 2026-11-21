@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #31; PR #32 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #32; PR #33 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -17,7 +17,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - `engine.py`: **one background engine** for the whole app (`app.timer`). It handles the Upstox connection, scans, the 09:15 order, Order Management, orders, tracking, log and alerts. Pages only read its state; version counters trigger redraws, and events trigger toasts and browser notifications in every tab.
 - `app.py`: NiceGUI **single-page app** (`ui.sub_pages`), dark theme with a toggle, a header (LTP, status, Upstox ✓, DRY RUN/LIVE, Pause alerts, Pause algo) and a left nav. The pages are:
   - **Dashboard**
-  - **BEP Support**
+  - **BEP Support**: a nav group (PR #33) with **Support board** (`/support/board`; `/support` opens it) and **BEP Pair cross** (`/support/pair-cross`, decision 25). Both pages have **Download XLSX** (two sheets) and the **Replay a past day** bar.
   - **Order Management**: a nav group with **four** sub-pages, each with its own Add form (⭐ has none, rows are added automatically) and list. They are `/order-management/same-strike`, `/order-management/pair`, `/order-management/bep-star` and `/order-management/manual-entry`; `/order-management` opens Same strike. Each sub-item shows a row count, and its badge is green when a row is triggered and waiting for Place order. Add a sub-page through `OM_SUB` in `app.py`. Each row is an **order card** (like AlgoDelta's): a header with symbol/Buy/INTRADAY/TF, a status chip (WAITING, TRIGGERED, PENDING, ORDERED · SENT/DRY RUN, SQUARING OFF, EXITED · reason, FAILED, plus the limit chips of decision 16) and ⚡ Place / ✕ Delete / ✏ Edit (WAITING only). The body shows Entry Price (**Entry (filled)** once ordered), Quantity (lots, editable per card until ordered), P&L (**open P&L while running**, decision 22), live LTP, the level box (**Common price / Pair price / BEP / Order type**, decision 19), Target, Stoploss and Trailing (per card, PR #15; editable as app rules while the order is open, decision 18). A "Compact view" switch brings back the table. Live option LTP comes from `engine.refresh_option_ltps` (one batched call every `OPTION_LTP_SECONDS` = 2 s). Each card is linked to its order through `order_id`, which supplies Entry and the realized P&L (open P&L is computed locally from the 2 s LTP). **Entry at a price (PR C):**
     - Entry Price on a card is editable until it's ordered. Empty means a market order at ⚡.
     - With a price, ⚡ (only once TRIGGERED, so no pre-arm) **arms** the card. The chip shows `PENDING @ 95.00 ↓`, the app checks the live LTP every 2 s, and when LTP is ≤ the price (↓ dip) or ≥ it (↑ breakout) it sends the normal market `strategy_order`.
@@ -29,6 +29,8 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - **Setup**
   - **Logs**
 - `bep_monitor.py`: BEP Support board, ⭐ first support, and the 09:15 opening order (prepare + 1 s tick).
+- `pair_cross.py`: BEP Pair cross table (decision 25), run by `BepMonitor._cross_step` on the board's candles.
+- `replay.py`: Replay a past day (a separate `BepMonitor` with `replay=True`, historical candles through `ReplayClient`).
 - `common_watch.py`: Order Management rows (Same strike, Pair, ⭐, Manual Entry).
 - `order_bridge.py`: AlgoDelta JSON: `strategy_order`, `limit_order`, `squareoff_position` and `cancel_order`.
 - `limit_orders.py`: Manual Entry Limit mode helpers (state in the order row's `mg` column, app SL/Target/trail checks, Upstox order-book matching).
@@ -192,12 +194,32 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Setup break and expiry:** a validated "Failed breakdown" setup is **broken** when a later candle's low goes below the flush low. It **expires** `SUPPORT_SETUP_EXPIRY_CANDLES` = 3 candles (15 min) after the validate candle. A trigger whose own low breaks the flush low is "Touch and go" (fail level = its own low).
    - **New flush:** a candle that resets a flush or setup and itself **closed below BEP** starts a **new flush**.
    - **09:15 exception:** the validate low may break the flush low only when the **flush candle** is 09:15 (the old check never ran).
-   - **Still open (discussed, not changed):**
-     - only the first support per strike alerts or adds a ⭐;
-     - the First support card can show a strike outside the ATM window, and the lowest strike wins ties;
-     - a skipped candle leaves a gap in the state machine;
-     - the trigger has a +0.05 tolerance, the fail rule none;
-     - `max_above_bep` 0 becomes 15.
+   - **Follow-ups decided after the review (PR #33):**
+     - **Repeat alerts:** a support alerts (and adds a ⭐) for the first row of a strike/side, and again once every earlier row on that strike has **failed** (`row["star"]`; the board's ⭐ marks those rows).
+     - **First support card:** only strikes inside that candle's ATM window count; on a tie in the same candle, the strike **nearest ATM** wins.
+     - **A missing candle** (never arrived, given up, or no BEP) resets that leg to idle.
+     - The trigger keeps its +0.05 tolerance and the fail rule none (kept as is).
+     - 09:15 order: `max_above_bep` **0 = no limit**.
+
+25. **BEP Pair cross, Pair auto-add and Replay (PR #33):**
+   - **What:** on each closed 5-min candle (the board's candles, no extra API calls), a CE and a PE near ATM that **split around their BEPs**. It's independent of the Support board and ⭐. Examples from the user: 20 Nov 09:45 25450CE/25450PE (same strike, full body) and 11:35 25500CE/25550PE (different strikes, wicks).
+   - **Pairs:** ATM = the strike nearest NIFTY's close of that candle.
+     - **Bullish:** the leg above is the CE at ATM or ATM − 50 (1 strike ITM); the leg below is the PE at ATM − 50, ATM or ATM + 50.
+     - **Bearish:** the leg above is the PE at ATM or ATM + 50; the leg below is the CE at ATM ± 50.
+   - **Signal:** the up-leg closes > its BEP **and** the down-leg closes < its BEP, and the previous candle wasn't in that state. Either leg may have crossed first (e.g. PE below at 09:40, CE above at 09:45). A pair already split on the first candle counts. No margin past BEP.
+   - **Touch (user request):** both legs must have **touched** their BEP (low ≤ BEP + `BEP_CROSS_TOUCH_TOL` = 1 and high ≥ BEP − 1) on the signal candle or the 2 before (`BEP_CROSS_TOUCH_CANDLES` = 3). A leg far away from its BEP doesn't count.
+   - **Rows:** one per candle and direction. The best pair is the same strike first, else the smallest BEP gap; the others go in "Also". No new row for a pair while it's WATCHING; after FAILED it can signal again.
+   - **Watch 30 min** (`BEP_CROSS_WATCH_CANDLES` = 6): FAILED · time if the up-leg closes below its BEP or the down-leg closes above its BEP, else HELD. The table shows the best move of each leg and live LTPs (the 2 s batch) while watching.
+   - **Alerts:** a toast + browser notification **only on a live signal** (respects Pause alerts). Rows rebuilt after a late start don't alert.
+   - **Order Management > Pair (Part C):** a live signal adds a **TRIGGERED** Pair row (`add_cross_pair`), unless `BEP_CROSS_ADD_PAIR` is False.
+     - CE/PE price = each leg's BEP, **buffer 0**, 5 min, Strategy, the up-leg is the fired leg, chip "BEP cross hh:mm".
+     - Later candles use the normal Pair rules (opponent closing at or above its BEP = FAILED before ordering, opponent SL after).
+     - A table FAILED marks it FAILED before ⚡ (`sync_cross_failures`, run before new rows are added).
+     - It's skipped (logged) when a Pair row with the same strikes is still watching/triggered. Nothing is placed automatically.
+   - **Replay a past day (Part E):** a date + "BEP: uploaded CSV / calculated" + Replay on both BEP Support pages.
+     - It rebuilds the Support board and the Pair cross from Upstox **historical** candles in a separate monitor: no alerts, no ⭐ / Pair rows, no orders, and the live scan keeps running. "Back to live" returns. Downloads include "_replay".
+     - Only days since the last expiry (older contracts aren't listed). The CSV must be **that day's** file; calculated = (CE + PE) / 2 of the previous day's closes (`fetch_close_before`, 2 calls per strike, ATM windows only).
+     - Not available on non-trading days for "today": the board only reads today's intraday candles, so on a weekend the live board is empty (the user asked on Sat 21 Nov).
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
@@ -223,7 +245,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PR #32: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 and #33: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**

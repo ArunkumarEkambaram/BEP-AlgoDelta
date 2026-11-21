@@ -30,3 +30,17 @@ def build_xlsx(rows: list, columns: list) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def build_xlsx_sheets(sheets: list) -> bytes:
+    """sheets: list of (title, rows, columns); one worksheet each (empty sheets keep their header row)."""
+    wb = Workbook()
+    wb.remove(wb.active)
+    for title, rows, columns in sheets:
+        ws = wb.create_sheet(title[:31])
+        ws.append([label for _, label in columns])
+        for r in rows:
+            ws.append([r.get(key, "") for key, _ in columns])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

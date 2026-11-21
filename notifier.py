@@ -10,6 +10,16 @@ def support_label(e: dict) -> str:
             f"close {e['close']:.2f} | {e['time']} ({how})")
 
 
+def cross_label(e: dict) -> str:
+    """BEP Pair cross signal (pair_cross.py): one leg closed above its BEP, the other below its BEP."""
+    up, dn = e["up"], e["dn"]
+    side = "Bullish" if e.get("dir") == "up" else "Bearish"
+    also = f" | also {', '.join(e['also'])}" if e.get("also") else ""
+    return (f"{e.get('index', 'NIFTY')} BEP Pair cross {e['time']} ({side}): {up['strike']}{up['opt']} closed "
+            f"{up['close']:.2f} above BEP {up['bep']:.2f} | {dn['strike']}{dn['opt']} closed {dn['close']:.2f} "
+            f"below BEP {dn['bep']:.2f} | ATM {e.get('atm')}{also}")
+
+
 def common_label(r: dict) -> str:
     if r.get("trig_how") == "ltp":                    # Trigger on live LTP
         if r.get("kind") == "pair":
