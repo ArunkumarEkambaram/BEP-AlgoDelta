@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #41; PR #42 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #41; PR #42 and PR #43 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -194,6 +194,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - the LTP is **already back below** the row's level (Common price / Pair price / BEP): "the setup may have failed". Not for Manual cards.
    - **Setting an SL after placing** (the ordered card or the Order Details popup): "Check the stoploss" when it's at or above the Entry (`guarded_sl_set`).
    - POINT SLs are always below the entry, so they're never flagged.
+   - **Far above BEP (PR #43, user request 23 Nov):** on ⭐, BEP cross Pair (fired leg) and Manual Entry cards (the strike's BEP from the CSV, else calculated; `Engine.row_bep`), the popup adds "LTP 168.70 is **11.13 points above** BEP 157.57 (warning above 10): late entry, bigger risk to the SL" when LTP − BEP > Setup **"Warn at ⚡ when LTP is more than X points above BEP"** (`warn_above_bep`, default 10; 0 = off). For Limit / Stop-limit the limit price is checked the same way. Same strike and normal Pair cards (own levels) and the automatic 09:15 order (its own `max_above_bep`) are not affected.
 
 24. **BEP Support setup fixes (PR #32):** in `support_logic.process_candle` (5-min candles).
    - **Setup break and expiry:** a validated "Failed breakdown" setup is **broken** when a later candle's low goes below the flush low. It **expires** `SUPPORT_SETUP_EXPIRY_CANDLES` = 3 candles (15 min) after the validate candle. A trigger whose own low breaks the flush low is "Touch and go" (fail level = its own low).
