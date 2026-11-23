@@ -235,10 +235,23 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - The header chip / Compact Pair column read `25600CE / 25650PE · BEP 137.32 / 126.15` (`CommonWatch.pair_title`).
    - Pair cards (all) show the LTP as `CE x` / `PE y` on two lines (the one-line text overlapped the next box).
    - Manual Pair rows keep "Pair price" (the user's own levels).
+28. **Stop-limit entry and the limit-above-LTP warning (PR #36):**
+   - **Why:** the user set a Manual BUY **Limit 140** with the LTP at 134.65 and it filled at once. A BUY limit means "at 140 **or cheaper**". What they wanted was a broker **Buy StopLimit**: wait until the price **rises** to 140.
+   - **AlgoDelta `sl_order`** (checked by the user in the Syntax Generator, 23 Nov 2026): `{"type":"sl_order","script_type","script","product","quantity","price","trigger_price","transaction_type":"BUY"}`. It waits **at the exchange** (Upstox status "trigger pending") until LTP ≥ trigger, then it's a limit at `price`.
+   - **Manual Entry:** a 4th mode, **Price | Market | Limit | Stop-limit**, with **Trigger (LTP rises to)** and **Limit price** (default trigger + `STOP_LIMIT_GAP` = 1, editable). The row stays `entry_mode` "limit" with **`entry_trigger`** set, so everything else is the Limit flow (decision 16): app-watched SL/Target/trail, order-book fill tracking, cancel, Delete, 15:15.
+     - The card's Entry box has two inputs (trigger → limit). The Order type box shows **Stop-limit** with "at LTP ≥ x, limit y".
+     - The chip shows `STOP @ 140.00 → LIMIT 141.00` until triggered, then `LIMIT OPEN @ 141.00` → `FILLED @ x`.
+     - ⚡ is refused when the LTP is already ≥ the trigger (it would trigger at once): raise the trigger, or use Limit / Market.
+   - **`limit_orders`:** `mg.trigger` / `mg.triggered`. The order book is matched on `order_type` "SL" plus the trigger price. "trigger pending" = waiting; any other open status, or a fill, = triggered.
+     - **Dry run:** triggers when the live LTP ≥ the trigger, then fills once LTP ≤ the limit, at min(limit, LTP). A spike past the limit stays open, like a real stop-limit.
+   - **Limit-above-LTP warning (all Limit cards):** ⚡ on a BUY limit above the LTP asks "This limit fills immediately", with **Send limit anyway** / **Switch to Stop-limit** (Manual cards: trigger = the price, limit = price + 1; then check the card and ⚡ again) / Cancel. It replaces the 20 % typo popup in that case; stop-limits skip the typo popup.
+   - Stop-limit is Manual Entry only for now (Same strike / Pair / ⭐ keep Strategy | Limit).
+   - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot.
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
+- Stop-limit entry (PR #36): `{"type": "sl_order", "script_type": "CE", "script": "NIFTY23NOV2625650CE", "product": "INTRADAY", "quantity": 1, "price": 150, "trigger_price": 150, "transaction_type": "BUY"}` (quantity = lots; the app sends price = the limit, trigger_price = the trigger).
 - Cancel: `{"type": "cancel_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY"}` (no order ID).
 - Square-off: `{"type": "squareoff_position", "script_type": "CE", "script": "NIFTY23NOV2625300CE", "product": "INTRADAY"}`.
 - AlgoDelta has **no modify-SL/Target syntax** (and no modify-order syntax) and no public read API (positions/fills), so live P&L comes from Upstox.

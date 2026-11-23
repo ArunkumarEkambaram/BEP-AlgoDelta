@@ -202,13 +202,26 @@ def limit_payload(sig: dict) -> dict:
             "price": _num(round(float(sig["price"]), 2), 0), "transaction_type": "BUY"}
 
 
+def entry_payload(sig: dict) -> dict:
+    """limit_order, or AlgoDelta sl_order (BUY stop-limit: waits at the exchange until the LTP rises to
+    trigger_price, then becomes a limit order at price) when the signal has a trigger."""
+    p = limit_payload(sig)
+    if sig.get("trigger"):
+        p = {**p, "type": "sl_order", "trigger_price": _num(round(float(sig["trigger"]), 2), 0)}
+        p = {k: p[k] for k in ("type", "script_type", "script", "product", "quantity", "price", "trigger_price",
+                               "transaction_type")}
+    return p
+
+
 def send_limit(sig: dict) -> dict:
-    """Sends a limit_order entry. Same gates as an entry order: Pause algo, dry run, webhook / confirmation and
+    """Sends a limit_order (or sl_order, with a trigger) entry. Same gates as an entry order: Pause algo, dry run, webhook / confirmation and
     the daily order limit."""
     cfg = config.AUTO_ORDER[sig["index"]]
-    payload = limit_payload(sig)
+    payload = entry_payload(sig)
     text = json.dumps(payload)
-    head = f"{sig['index']} {sig['opt']} {sig['strike']} [manual entry, LIMIT {payload['price']}] (LTP {sig['ltp']:.2f})"
+    what = f"STOP-LIMIT trigger {payload['trigger_price']} limit {payload['price']}" if sig.get("trigger") \
+        else f"LIMIT {payload['price']}"
+    head = f"{sig['index']} {sig['opt']} {sig['strike']} [manual entry, {what}] (LTP {sig['ltp']:.2f})"
     if config.AUTO_ORDER_PAUSED:
         return _res("blocked", f"Algo trading is PAUSED; NOT sent: {head}", payload, "Algo trading paused")
     today = datetime.now().strftime("%Y-%m-%d")
@@ -231,9 +244,9 @@ def send_limit(sig: dict) -> dict:
         resp = requests.post(cfg["webhook_url"], json=payload, timeout=5)
         body = (resp.text or "")[:200]
         if 200 <= resp.status_code < 300:
-            return _res("sent", f"LIMIT ORDER SENT {head} -> HTTP {resp.status_code} {body}", payload,
+            return _res("sent", f"{'SL' if sig.get('trigger') else 'LIMIT'} ORDER SENT {head} -> HTTP {resp.status_code} {body}", payload,
                         f"HTTP {resp.status_code} {body}")
-        return _res("failed", f"LIMIT ORDER FAILED {head} -> HTTP {resp.status_code} {body} (not retried)", payload,
+        return _res("failed", f"{'SL' if sig.get('trigger') else 'LIMIT'} ORDER FAILED {head} -> HTTP {resp.status_code} {body} (not retried)", payload,
                     f"HTTP {resp.status_code} {body} (not retried)")
     except Exception as ex:
-        return _res("failed", f"LIMIT ORDER FAILED {head} -> {ex} (not retried)", payload, f"{ex} (not retried)")
+        return _res("failed", f"{'SL' if sig.get('trigger') else 'LIMIT'} ORDER FAILED {head} -> {ex} (not retried)", payload, f"{ex} (not retried)")
