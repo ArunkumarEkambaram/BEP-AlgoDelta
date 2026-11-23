@@ -1,6 +1,7 @@
 """
 bep_monitor.py — watches the strikes near ATM against each strike's BEP, for ONE index.
 """
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta, time as dtime, datetime
 
@@ -180,8 +181,26 @@ class BepMonitor:
         self.lock_side(day, opt, strike, now.strftime("%H:%M:%S"), "queued")
         sig = {"index": self.name, "opt": opt, "strike": strike, "bep": level, "ltp": ltp, "expiry": self.expiry,
                "kind": "opening", "order_type": "strategy_order", "time": now.strftime("%H:%M:%S"), "date": day}
+        sig.update(self._opening_sl(level, now))
         self.new_orders.append(sig)
         return True
+
+    def _opening_sl(self, level, now) -> dict:
+        """09:15 order SL (PR #41): a CANDLE close below BEP - open_sl_below on open_sl_tf-minute candles, watched
+        by the app (AlgoDelta gets is_sl false, so it holds no SL and cannot trail; the Setup trailing SL, if on,
+        is watched by the app too). Returns {"params", "app_rules"}."""
+        cfg = config.AUTO_ORDER.get(self.name, {})
+        below = float(cfg.get("open_sl_below", 2) or 0)
+        tf = int(cfg.get("open_sl_tf", 5) or 5)
+        rule = {"kind": "sl", "type": "CANDLE", "value": round(level - below, 2), "tf": tf, "set_at": "",
+                "custom": False}
+        app_rules = {"c_sl": json.dumps(rule)}
+        if cfg.get("trail"):
+            app_rules["c_trail"] = json.dumps({
+                "trigger": float(cfg.get("trail_trigger", 20)), "gap": float(cfg.get("trail_gap", 20)),
+                "step": float(cfg.get("trail_point") or 1), "set_at": now.strftime("%H:%M:%S"), "high": None,
+                "done": ""})
+        return {"params": {"is_sl": False}, "app_rules": app_rules}
 
     # ------------------------------------------------------------------ 09:15 opening order
     def prepare_opening(self, client, index_ltp: float, now, log_fn) -> bool:
@@ -265,7 +284,9 @@ class BepMonitor:
             seen_low = min(self._open_low.get(key, ltp), ltp, float(low) if low is not None else ltp)
             self._open_low[key] = seen_low
             level = leg["bep"]
-            if not (seen_low <= level + support_logic.TOL and ltp > o and ltp > level):
+            above = float(config.AUTO_ORDER.get(self.name, {}).get("open_entry_above", 2) or 0)
+            entry = level + above                            # PR #41: enter at BEP + 2 (0 = just above BEP)
+            if not (seen_low <= level + support_logic.TOL and ltp > o and (ltp >= entry if above else ltp > level)):
                 continue
             if max_above > 0 and ltp - level >= max_above:
                 if key not in self._far_logged:
@@ -281,7 +302,10 @@ class BepMonitor:
             _dist, strike, level, ltp = min(cands)
             if self._queue_order(opt, strike, level, ltp, now):
                 others = ", ".join(str(c[1]) for c in sorted(cands) if c[1] != strike)
-                log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed above BEP {level:.2f} (LTP {ltp:.2f}) "
+                cfg = config.AUTO_ORDER.get(self.name, {})
+                log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed BEP {level:.2f} + "
+                       f"{float(cfg.get('open_entry_above', 2) or 0):g} (LTP {ltp:.2f}); SL = {cfg.get('open_sl_tf', 5)}-min "
+                       f"close below {level - float(cfg.get('open_sl_below', 2) or 0):.2f} (app-watched) "
                        f"- order signal queued; no more {opt} orders today"
                        + (f" (also qualified, skipped: {others})" if others else ""))
 
