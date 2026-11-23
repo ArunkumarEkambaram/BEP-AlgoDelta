@@ -2221,6 +2221,10 @@ def orders_page():
                          "App " + (limit_orders.describe(m) or "no SL / Target")] + parts
                 if m.get("exit"):
                     parts.append(m["exit"])
+            if not m and r.get("kind", "Opening candle") == "Opening candle" and r.get("c_sl"):
+                prm = trade_tracker._params(r)            # PR #47: the max SL AlgoDelta holds for the 09:15 order
+                if prm.get("is_sl") and prm.get("sl"):
+                    parts.append(f"Max SL {prm['sl']:g} pts (AlgoDelta)")
             if engine.trail_text(r):
                 parts.append(engine.trail_text(r))
             r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
@@ -2382,6 +2386,10 @@ def algodelta_card(name):
                         .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
                     ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
                                            label="SL candle").classes("w-28")
+                ad_open_max = ui.number("09:15 max SL: points below the fill (AlgoDelta, 0 = none)",
+                                        value=ad_cfg.get("open_max_sl", 17), min=0, step=1).classes("w-full") \
+                    .tooltip("A POINT SL held by AlgoDelta from its fill (e.g. entry 152 - 17 = 135), on top of the "
+                             "candle SL: exits on a fast fall or if this PC is off. The trailing SL stays with the app.")
                 ad_warn_bep = ui.number("Warn at \u26a1 when LTP is more than X points above BEP (0 = off)",
                                         value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
                     .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
@@ -2465,6 +2473,9 @@ def algodelta_card(name):
         open_entry, open_sl = num(ad_open_entry.value), num(ad_open_sl.value)
         if open_entry is None or open_sl is None or open_entry < 0 or open_sl < 0:
             return None, "09:15 entry above BEP and SL below BEP must be numbers of 0 or more."
+        open_max = num(ad_open_max.value)
+        if open_max is None or open_max < 0:
+            return None, "09:15 max SL must be a number of 0 or more (0 = none)."
         trail = bool(ad_trail.value)
         t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
         if trail:
@@ -2475,7 +2486,7 @@ def algodelta_card(name):
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
-                "warn_above_bep": warn_bep,
+                "open_max_sl": open_max, "warn_above_bep": warn_bep,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -2502,8 +2513,9 @@ def algodelta_card(name):
                            f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}, manual {nums['tgt_manual']:g}), SL {nums['sl']} ({nums['sl_type']}), "
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
                            f"09:15 order at LTP >= BEP + {nums['open_entry_above']:g} and < BEP + {nums['max_above_bep']}, "
-                           f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app); "
-                           f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
+                           f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app)"
+                           + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta); " if nums['open_max_sl'] else "; ")
+                           + f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                            f"(live orders need both).")
 
     def preview():

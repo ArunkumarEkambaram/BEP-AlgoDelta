@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #45; PR #46 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #46; PR #47 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -54,6 +54,9 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - Entry: LTP ≥ **BEP + `open_entry_above`** (2) instead of LTP > BEP. The touch, LTP > open, one CE + one PE, `max_above_bep` (still from BEP) and the market `strategy_order` stay. With `open_entry_above` = 0 it's the old LTP > BEP.
      - SL: a **5-min candle close below BEP − `open_sl_below`** (2), e.g. BEP 150 → exit on a 5-min close below 148 (a wick doesn't exit). It's stored on the order as a CANDLE `c_sl` (`BepMonitor._opening_sl`) and the order is sent with `is_sl` false, so **AlgoDelta holds no SL**: the app squares off (keep the PC on). The Setup trailing SL, if on, is watched by the app too (`c_trail`). The Target stays the Setup Target, held by AlgoDelta.
      - Setup: "09:15 entry above BEP +" (2), "09:15 SL: close below BEP −" (2), "SL candle" 1 / 3 / 5 min (5) (`open_entry_above`, `open_sl_below`, `open_sl_tf` in `AUTO_ORDER`, saved in settings.json).
+   - **Max SL 17 points, held by AlgoDelta (PR #47, user request 23 Nov):** the candle SL had no cap (a fall inside a 5-min candle exits only at the close) and nothing exited if the PC was off. Now the order is sent with `is_sl` true and a **POINT SL of `open_max_sl`** (17) from AlgoDelta's fill, e.g. BEP 150, entry 152 → max SL 135, and `is_trail_set` false (the Setup trail stays with the app, `c_trail`, so AlgoDelta's 135 stays fixed). The 5-min close below BEP − 2 stays the normal exit; whichever hits first exits. Near the top of the range (entry 165) both are 148, but the max SL fires on the LTP. Planned risk was 4 to ~17 points (entry BEP + 2 to < BEP + 15).
+     - Setup "09:15 max SL: points below the fill (AlgoDelta, 0 = none)" (`open_max_sl`, saved; 0 = the old `is_sl` false). The Log line and Order Details SL / Target show "Max SL 17 pts (AlgoDelta)". Dry run simulates both rules (checked: drift → candle SL 147; crash to 130 inside a candle → 135).
+     - No double exit: live, the app's candle rule is checked only while the Upstox trade book shows no exit (30 s refresh).
 6. **Order Details:** Entry, Exit, LTP, Captured Points (**Exit − Entry** once exited; while open, `x (open)` from the live LTP, decision 22) and P&L ₹ (the same).
    - **Live:** Upstox trade book (`get-trades-for-day`, every 30 s). Fills are matched by option and **shared FIFO between orders on the same option** (PR #10).
    - **Dry run:** entry = LTP at the signal. The exit is **simulated** from 1-min candles using the order's SL/Target/trail (SL first if both hit in the same minute; 15:15 square-off). It's saved in the orders file.
@@ -287,7 +290,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #45: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #47: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
