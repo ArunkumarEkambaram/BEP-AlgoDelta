@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #39; PR #40 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #41; PR #42 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -125,7 +125,8 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Exit chip (PR #23):** EXITED · App SL / App trailing SL / App target / 15:15 / Opponent SL / Manual (from `mg.exit`, also set by `square_off`).
    - **Header badge:** "APP-MANAGED SL ACTIVE (n) - keep this PC on" / "LIMIT OPEN (n)".
    - **Restart:** the state is in the orders file (`mg`), so watching resumes.
-   - **Order Details:** shows the limit state and app rules in SL/Target, plus a Cancel order action. The SL/Target can't be edited after placing (`order_rule_editable` is false).
+   - **Order Details:** shows the limit state and app rules in SL/Target, plus a Cancel order action.
+   - **Editing after placing (PR #42, user request 23 Nov; it was locked before):** SL, Target and Trailing of a Limit / Stop-limit order are editable while it's pending or filled and not exited (the card boxes and the Order Details popup; `order_rule_editable`). AlgoDelta holds none for these orders, so an edit **replaces** the rule: LTP / POINT → `mg.sl` / `mg.tgt` (live LTP), CANDLE → `c_sl` / `c_tgt` (candle closes), × removes it (`Engine._set_limit_rule`, `order_rule`, `order_trail`). The trail goes to `mg.trail`, and it now also works with only a CANDLE SL (`limit_orders.sl_level`). The "Check the stoploss" warning applies.
 
 17. **Limit for Same strike, Pair and ⭐ (PR #22):**
    - **Choosing the type:**
