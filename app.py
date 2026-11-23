@@ -1940,7 +1940,7 @@ def manual_page():
                 with ui.column().classes("gap-0"):
                     ui.label("Order").classes("text-xs opacity-70")
                     mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit",
-                                      "stoplimit": "Stop-limit"}, value="limit").props("dense no-caps")
+                                      "stoplimit": "Stop-limit"}, value="stoplimit").props("dense no-caps")   # default (PR #40)
                 trigger = ui.number("Trigger (LTP rises to)", value=None, min=0, step=0.05).classes("w-40")
                 trigger.bind_visibility_from(mode, "value", lambda v: v == "stoplimit")
                 price = ui.number("Limit price", value=None, min=0, step=0.05).classes("w-32")
@@ -1956,15 +1956,15 @@ def manual_page():
                     ui.label("LTP").classes("text-xs opacity-70")
                     ltp_lbl = ui.label("--").classes("text-lg font-bold")
 
-            async def get_ltp(_e=None, name=name, strike=strike, opt=opt, ltp_lbl=ltp_lbl, price=price):
+            async def get_ltp(_e=None, name=name, strike=strike, opt=opt, ltp_lbl=ltp_lbl, price=price, mode=mode):
                 try:
                     k = int(strike.value)
                 except (TypeError, ValueError):
                     return None
                 v = await engine.quote_option(name, k, opt.value)
                 ltp_lbl.set_text(f"{v:.2f}" if v is not None else "--")
-                if v is not None and not price.value:
-                    price.set_value(v)
+                if v is not None and not price.value and mode.value in ("price", "limit"):   # Stop-limit: the
+                    price.set_value(v)                    # trigger must be above the LTP, so you type it
                 return v
             strike.on("blur", get_ltp)
             opt.on_value_change(get_ltp)
