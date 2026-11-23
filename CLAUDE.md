@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #44; PR #45 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #45; PR #46 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -260,7 +260,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - Example: the 23 Nov 10:15 BEP cross 25500CE (BEP 167.57, LTP 156.60): Stop-limit sends `sl_order` trigger 167.57 → limit 168.57 and waits for the CE to rise back above its BEP.
      - Merged 23 Nov 2026; the user confirmed Stop-limit shows on Pair cards.
    - **Manual Entry default = Stop-limit (PR #40, user request 23 Nov):** the form opens on Stop-limit. The trigger is **not** pre-filled (it must be above the LTP; the LTP shows beside it); typing it fills the limit = trigger + 1. The LTP pre-fill of the price box now applies only to Price / Limit.
-   - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot. Merged 23 Nov 2026; the user confirmed the card shows correctly and plans the 1-lot live test on 24 Nov.
+   - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot. Merged 23 Nov 2026; the user confirmed the card shows correctly and planned the 1-lot live test on 24 Nov, but 24 Nov is a market holiday, so it moves to the next trading day.
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
@@ -305,6 +305,15 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
       - **AlgoDelta:** compliance and empanelment; will the static IP add-on continue (date, notice); is "algo on my PC + AlgoDelta's IP" accepted; who collects the undertaking; will webhooks keep working; algo ID / registration / order-per-second limit; refund; what happens to open positions and pending SL/Target if suspended.
       - **Upstox:** how to register as a tech-savvy retail client and the undertaking text; algo registration and the order-per-second threshold; registering a cloud static IP (AWS Elastic IP / Lightsail, Mumbai), how many and how to change; which order APIs are allowed (place/modify/cancel by ID, SL/SL-M, GTT, single-position exit); which calls don't need the IP; charges; rate limits; moving off the third-party platform; emergency exit if it stops.
     - **Waiting on the user:** the replies from AlgoDelta and Upstox. When they arrive, turn them into the cloud server + Upstox direct plan.
+- **PLANNED: a separate "BEP Upstox" app (Upstox direct + cloud), agreed 23 Nov 2026; start on 24 Nov (market holiday).** This app (AlgoDelta) stays unchanged and in use until AlgoDelta / Upstox reply to the circular questions.
+  - **Estimate given (23 Nov):** about a quarter of the code changes (1,500–2,500 lines over 6–8 PRs). Unchanged: BEP Support, ⭐, Pair cross, Replay, Order Management triggers, exit rules, Order Details. Replaced: `order_bridge.py` → a new `upstox_orders.py` (place market / limit / SL, modify, cancel by order ID, exit a position, errors, rate limits). The biggest change is in `engine.py`: the app holds the SL / Target / trail itself instead of one `strategy_order`. `limit_orders.py` gets simpler (match by order ID). Square-off becomes per order. `app.py` Setup: the AlgoDelta section → Upstox order settings. Tokens: roughly 1 to 1.5× the PR #36–#45 session (about 3–6 M processed, mostly cached re-reads), spread over several sessions. Live 1-lot tests take the most time.
+  - **Suggested answers (the user agreed to record them; confirm each before coding):**
+    1. **New GitHub repo** (e.g. `BEP-Upstox`), a copy of `main` with its history. The user creates the empty repo (no README); Claude adds it with `add_repo` and pushes the copy. Important BEP-logic fixes are ported to both apps until one is retired. (Not chosen: one repo with two entry points.)
+    2. **Side by side:** port **8084**, its own `settings.json`, orders files and logs; the same Upstox token works in both.
+    3. **Phase 1 before the static IP:** the Upstox order module, dry run, the flow fill → SL order at the exchange → trailing by modifying that SL, and a Setup switch. Live orders need the registered static IP; check whether the Upstox order-API **sandbox** can test the calls without it.
+    4. **SL at the exchange** (SL sell order right after the fill; trailing modifies it), so it stays active if the PC / app is down. **Target watched by the app** (at target: cancel the SL, then sell). No resting Target sell next to the SL sell (both could fill and leave a short). Ask Upstox whether GTT (entry + target + SL) supports trailing.
+    5. **Cloud parts built now, deployed after the replies:** password login, deploy script (`git pull` + restart), run on boot, IST clock. Suggested provider: AWS Lightsail Mumbai (static IP included).
+    6. **PR order (new repo):** (1) copy and rename (port 8084, own files, title "BEP Upstox"); (2) Upstox order module + dry run; (3) strategy orders with SL at the exchange + trailing; (4) Limit / Stop-limit / cancel / square-off by order ID; (5) login + cloud deploy script. Same working rules as here.
 - **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this; **priority raised by NSE Circular 58/2026**, see above):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
