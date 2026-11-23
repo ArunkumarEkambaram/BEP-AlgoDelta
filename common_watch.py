@@ -148,12 +148,16 @@ class CommonWatch:
         return row
 
     def set_stoplimit(self, row_id, trigger, price) -> dict:
-        """Turns a Manual limit card that is not ordered yet into a stop-limit (trigger) or back (trigger None)."""
+        """Turns a limit card that is not ordered yet into a stop-limit (trigger) or back to a limit (trigger None)."""
         r = self.get(row_id)
-        if not r or r.get("source") != "manual" or r.get("order_status"):
+        if not r or r.get("order_status") in ("SENT", "DRY RUN", "sending", "PENDING"):
             return None
         r.update(entry_mode="limit", entry_trigger=round(float(trigger), 2) if trigger else None,
-                 entry_price=round(float(price), 2), price=float(price))
+                 entry_price=round(float(price), 2), entry_dir=None)
+        if r.get("source") == "manual":
+            r["price"] = float(price)
+        else:
+            r["entry_stop"] = bool(trigger)
         self.save()
         return r
 
@@ -236,9 +240,16 @@ class CommonWatch:
         """Order type of a card: "limit" = AlgoDelta limit_order at the card's Entry Price (pre-filled with the
         row's level; a Pair before it fires uses the fired leg's price), SL / Target watched by the app.
         None = strategy_order (market, or the app-side PENDING entry when an Entry Price is set)."""
-        r["entry_mode"] = "limit" if mode == "limit" else None
-        r["entry_price"] = round(float(r["price"]), 2) if mode == "limit" and r.get("price") else None
+        lim = mode in ("limit", "stoplimit")
+        r["entry_mode"] = "limit" if lim else None
+        r["entry_price"] = round(float(r["price"]), 2) if lim and r.get("price") else None
         r["entry_dir"] = None
+        # "stoplimit" (PR #38) = AlgoDelta sl_order: waits at the exchange until the LTP rises to the trigger
+        # (default the level; a Pair before it fires: the fired leg's price), then a limit at trigger + gap
+        r["entry_stop"] = mode == "stoplimit"
+        r["entry_trigger"] = r["entry_price"] if mode == "stoplimit" else None
+        if mode == "stoplimit" and r["entry_price"]:
+            r["entry_price"] = round(r["entry_price"] + config.STOP_LIMIT_GAP, 2)
 
     def set_mode(self, row_id: int, mode) -> bool:
         """Switches a card between Strategy and Limit (resets its Entry Price). Locked once ordered / pending."""
@@ -296,6 +307,8 @@ class CommonWatch:
             return False
         follow = r.get("entry_mode") == "limit" and r.get("entry_price") is not None \
             and r.get("price") is not None and abs(r["entry_price"] - r["price"]) < 1e-9
+        follow_stop = r.get("entry_stop") and r.get("entry_trigger") is not None \
+            and r.get("price") is not None and abs(r["entry_trigger"] - r["price"]) < 1e-9
         r.update(tf=int(tf), baseline=None, armed=False)
         if trig_on in ("close", "ltp"):
             r["trig_on"] = trig_on
@@ -305,7 +318,9 @@ class CommonWatch:
             r["legs"] = {o: {"prev_close": None, "last_close": None, "last_done": None} for o in ("CE", "PE")}
         else:
             r.update(price=float(price), last_done=None, prev_close=None)
-            if follow:                                  # a limit price that was the level follows the new level
+            if follow_stop:                             # a stop-limit trigger that was the level follows it
+                self._apply_mode(r, "stoplimit")
+            elif follow:                                # a limit price that was the level follows the new level
                 r["entry_price"] = round(float(price), 2)
         self.save()
         return True
