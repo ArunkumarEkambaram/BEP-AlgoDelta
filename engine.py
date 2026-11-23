@@ -1427,6 +1427,18 @@ class Engine:
         o = next((x for x in self.order_log if x["id"] == order_id), None)
         if not o or not self.order_rule_editable(o):
             return False
+        if o.get("mg"):                                  # limit / stop-limit: replaces mg.trail (PR #42)
+            m = limit_orders.parse(o["mg"])
+            on = bool(trail and trail.get("on"))
+            m["trail"] = {"trigger": float(trail["trigger"]), "gap": float(trail["gap"]),
+                          "step": float(trail.get("point") or 1)} if on else None
+            self._limit_save(o, m)
+            self.log(f"{o['index']} {o['strike']}{o['opt']} limit order: app trailing SL " + (
+                f"set (trigger {trail['trigger']:g}, gap {trail['gap']:g}, point {trail.get('point', 1):g})"
+                if on else "removed") + ".")
+            self._rewrite_orders_file()
+            self.bump("orders", "watch")
+            return True
         o["c_trail"] = self._trail_json(trail) if trail and trail.get("on") else ""
         self.log(f"{o['index']} {o['strike']}{o['opt']} order: app trailing SL " + (
             f"set (trigger {trail['trigger']:g}, gap {trail['gap']:g}, point {trail.get('point', 1):g})"
@@ -1478,17 +1490,54 @@ class Engine:
     # ------------------------------------------------------------------ per-order SL / Target (Order Details)
     @staticmethod
     def order_rule_editable(r) -> bool:
-        if r.get("mg"):                                 # limit order: its rules are the app's own (set on the card)
-            return False
+        m = limit_orders.parse(r.get("mg"))
+        if m:                     # limit / stop-limit (PR #42): the app holds its rules, so an edit REPLACES them
+            return (r.get("status") in ("SENT", "DRY RUN") and not m.get("exit") and not r.get("c_done")
+                    and not Engine.squared_off(r) and trade_tracker._f(r.get("exit")) is None
+                    and (limit_orders.pending(m) or limit_orders.held(m)))
         return (r.get("status") in ("SENT", "DRY RUN") and r.get("kind", "Opening candle") != "Opening candle"
                 and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
 
+    @staticmethod
+    def order_rule(o, kind):
+        """The SL / Target rule an order is watched with now (dict or None): its app rule (c_sl / c_tgt); for a
+        limit / stop-limit order also the LTP / POINT rule kept in mg."""
+        rule = exit_rules.parse(o.get("c_" + kind))
+        m = limit_orders.parse(o.get("mg"))
+        if rule is None and m and m.get(kind):
+            rule = exit_rules.make_rule(kind, m[kind]["type"], m[kind]["value"], custom=False)
+        return rule
+
+    @staticmethod
+    def order_trail(o):
+        """App trailing SL of an order as {"trigger", "gap", "step", ...} (limit orders: from mg) or None."""
+        m = limit_orders.parse(o.get("mg"))
+        if m:
+            return m.get("trail")
+        return Engine.app_trail(o)
+
+    def _set_limit_rule(self, o, kind, rule):
+        """Limit / stop-limit order: replaces its SL / Target. LTP / POINT go to mg (live LTP check), CANDLE to
+        c_sl / c_tgt (candle closes); None removes it."""
+        m = limit_orders.parse(o["mg"])
+        m[kind] = {"type": rule["type"], "value": float(rule["value"])} if rule and rule["type"] != "CANDLE" else None
+        o["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule and rule["type"] == "CANDLE" else ""
+        self._limit_save(o, m)
+
     def set_order_custom(self, row_id, kind, rule):
-        """Sets (rule) or clears (None) an order's own SL / Target after it was placed. Watched by the app;
-        AlgoDelta's original SL / Target stay active too (no modify syntax), so whichever hits first exits."""
+        """Sets (rule) or clears (None) an order's own SL / Target after it was placed. Watched by the app.
+        Strategy order: AlgoDelta's original SL / Target stay active too (no modify syntax), so whichever hits
+        first exits. Limit / stop-limit order: the new rule REPLACES the old one (AlgoDelta holds none)."""
         r = next((o for o in self.order_log if o["id"] == row_id), None)
         if not r or not self.order_rule_editable(r):
             return False
+        if r.get("mg"):
+            self._set_limit_rule(r, kind, rule)
+            self.log(f"{r['index']} {r['strike']}{r['opt']} limit order: {'SL' if kind == 'sl' else 'Target'} "
+                     + (f"changed to {exit_rules.describe(rule)}" if rule else "removed") + " (app-watched).")
+            self._rewrite_orders_file()
+            self.bump("orders", "watch")
+            return True
         r["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule else ""
         what = "SL" if kind == "sl" else "Target"
         self.log(f"{r['index']} {r['strike']}{r['opt']} order: {what} "

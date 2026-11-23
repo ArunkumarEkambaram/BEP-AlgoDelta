@@ -66,17 +66,17 @@ def cancellable(m) -> bool:
 def sl_level(m):
     """(current SL level, trailed?) from the fill price, the SL rule and the trailing SL; (None, False) if no SL."""
     fill = _f(m.get("fill"))
-    rule = m.get("sl")
-    if fill is None or not rule:
+    rule, t = m.get("sl"), m.get("trail")
+    if fill is None or (not rule and not t):
         return None, False
-    base = rule["value"] if rule["type"] == "LTP" else fill - rule["value"]
-    t, high = m.get("trail"), _f(m.get("high"))
-    if t and high is not None and high >= fill + t["trigger"]:
+    base = (rule["value"] if rule["type"] == "LTP" else fill - rule["value"]) if rule else None
+    high = _f(m.get("high"))
+    if t and high is not None and high >= fill + t["trigger"]:     # trails even with only a CANDLE SL (PR #42)
         step = t.get("step") or 1
         new = fill + int((high - t["gap"] - fill) // step) * step
-        if new > base:
+        if base is None or new > base:
             return round(new, 2), True
-    return round(base, 2), False
+    return (round(base, 2), False) if base is not None else (None, False)
 
 
 def tgt_level(m):
@@ -223,7 +223,8 @@ def describe(m) -> str:
         r = m["tgt"]
         parts.append(f"Tgt {r['value']:g}{' pts' if r['type'] == 'POINT' else ''}")
     if m.get("trail"):
-        parts.append(f"Trail {m['trail']['trigger']:g}/{m['trail']['gap']:g}")
+        parts.append(f"Trail {m['trail']['trigger']:g}/{m['trail']['gap']:g}"
+                     + (f" (SL now {lvl:g})" if not m.get("sl") and lvl is not None else ""))
     return " · ".join(parts)
 
 
