@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #46; PR #47 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #47; PR #48 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -265,6 +265,14 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Manual Entry default = Stop-limit (PR #40, user request 23 Nov):** the form opens on Stop-limit. The trigger is **not** pre-filled (it must be above the LTP; the LTP shows beside it); typing it fills the limit = trigger + 1. The LTP pre-fill of the price box now applies only to Price / Limit.
    - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot. Merged 23 Nov 2026; the user confirmed the card shows correctly and planned the 1-lot live test on 24 Nov, but 24 Nov is a market holiday, so it moves to the next trading day.
 
+29. **Manual Entry BEP and Target "None" (PR #48, user request 23 Nov):**
+   - **BEP on the Manual Entry form:** next to the LTP, `BEP 157.57 (+11.13)` (LTP − BEP, green above / red below). It comes from the uploaded CSV, else calculated (`Engine.row_bep`). It refreshes with the LTP (strike blur, CE/PE change, ↻) and once when the page opens. Shown only, no check; the ⚡ "far above BEP" warning (decision 23) stays.
+   - **Target type None** (the user trails and wants bigger targets without changing the Setup default): the Target popup on every card (Same strike, Pair, ⭐, Manual; card box and Compact view) has **LTP / POINT / CANDLE / None**. It's stored as a `c_tgt` rule of type `NONE` (`exit_rules.NONE`, `is_none`; never evaluated). Switch OFF / × still means the Setup default.
+     - Strategy order: sent with `is_tgt` false (AlgoDelta holds no target). Limit / Stop-limit: no app target (`_limit_rules`). Dry run simulates no target.
+     - After placing: Limit / Stop-limit orders can be set to None (= remove the target, `_set_limit_rule`). Strategy orders can't (AlgoDelta's target was sent, no modify syntax), so the popup there has no None. An ordered card sent with None shows "None · no target (trail / SL only)".
+     - At ⚡: "Check before placing" adds "Target is None and the trailing SL is OFF: this order exits only by the SL, a manual square-off or 15:15" when the card's trail is off.
+     - The 09:15 order is unchanged (Setup target).
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -290,7 +298,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #47: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #48: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

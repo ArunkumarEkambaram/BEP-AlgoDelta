@@ -27,11 +27,14 @@ IST = market_utils.IST
 EXIT_TIME = dtime(15, 15)              # dry-run trades still open are closed at the 15:15 candle's open
 SESSION_START = dtime(9, 15)
 TYPES = ("LTP", "POINT", "CANDLE")
+NONE = "NONE"           # PR #48: Target "None" = this order has no target (exits by SL / trailing SL / manual / 15:15)
 TIMEFRAMES = (1, 3, 5)
 
 
 def make_rule(kind: str, rtype: str, value: float, tf=None, set_at: str = "", custom: bool = True) -> dict:
     rtype = rtype.upper()
+    if kind == "tgt" and rtype == NONE:
+        return {"kind": kind, "type": NONE, "value": 0.0, "tf": None, "set_at": set_at, "custom": custom}
     if kind not in ("sl", "tgt") or rtype not in TYPES:
         raise ValueError(f"bad rule {kind} {rtype}")
     return {"kind": kind, "type": rtype, "value": float(value),
@@ -46,7 +49,7 @@ def parse(value):
         return value
     try:
         rule = json.loads(value)
-        return rule if isinstance(rule, dict) and rule.get("type") in TYPES else None
+        return rule if isinstance(rule, dict) and rule.get("type") in TYPES + (NONE,) else None
     except (TypeError, ValueError):
         return None
 
@@ -54,11 +57,18 @@ def parse(value):
 def describe(rule) -> str:
     if not rule:
         return ""
+    if is_none(rule):
+        return "None (trail / SL only)"
     v = f"{rule['value']:g}"
     if rule["type"] == "CANDLE":
         side = "below" if rule["kind"] == "sl" else "above"
         return f"{v} on {rule['tf']}m candle close {side}"
     return f"{v} pts" if rule["type"] == "POINT" else f"{v} (LTP)"
+
+
+def is_none(rule) -> bool:
+    """Target "None": no target at all (not the same as no rule = the default target)."""
+    return bool(rule) and rule.get("type") == NONE
 
 
 def _minute(day: datetime, hhmmss: str):
@@ -95,7 +105,7 @@ def evaluate(entry: float, entry_time: str, candles: list, rules: list, now, eod
         return None
     active = []
     for r in rules or []:
-        if not r or r.get("value") is None:
+        if not r or r.get("value") is None or is_none(r):
             continue
         start = _minute(now, r.get("set_at") or "") or entry_min
         active.append({**r, "start": max(start, entry_min), "level": _level(r, entry), "trailed": False})

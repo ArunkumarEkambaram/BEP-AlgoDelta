@@ -194,7 +194,8 @@ def base_rules(prm: dict) -> list:
 
 def custom_rules(row) -> list:
     """Per-order SL / Target set in the app (Order Management before placing, Order Details after)."""
-    return [r for r in (exit_rules.parse(row.get("c_sl")), exit_rules.parse(row.get("c_tgt"))) if r]
+    return [r for r in (exit_rules.parse(row.get("c_sl")), exit_rules.parse(row.get("c_tgt")))
+            if r and not exit_rules.is_none(r)]
 
 
 def simulate_exit(entry: float, entry_time: str, candles: list, prm: dict, now):
