@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #36; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #37; PR #38 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -245,7 +245,12 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **`limit_orders`:** `mg.trigger` / `mg.triggered`. The order book is matched on `order_type` "SL" plus the trigger price. "trigger pending" = waiting; any other open status, or a fill, = triggered.
      - **Dry run:** triggers when the live LTP ≥ the trigger, then fills once LTP ≤ the limit, at min(limit, LTP). A spike past the limit stays open, like a real stop-limit.
    - **Limit-above-LTP warning (all Limit cards):** ⚡ on a BUY limit above the LTP asks "This limit fills immediately", with **Send limit anyway** / **Switch to Stop-limit** (Manual cards: trigger = the price, limit = price + 1; then check the card and ⚡ again) / Cancel. It replaces the 20 % typo popup in that case; stop-limits skip the typo popup.
-   - Stop-limit is Manual Entry only for now (Same strike / Pair / ⭐ keep Strategy | Limit).
+   - **Stop-limit on Same strike, Pair and ⭐ cards (PR #38, user request on 23 Nov):** every Order toggle (Add forms, card, Compact dialog) is **Strategy | Limit | Stop-limit**.
+     - The row keeps `entry_mode` "limit" plus **`entry_stop`** = True. The trigger defaults to the row's level (⭐ = BEP; Pair = the **fired leg's** price, known once it fires) and the limit to trigger + 1. Both are editable on the card (`entry_trigger` / `entry_price` once set). Helpers: `Engine.is_stop` / `Engine.stop_prices`.
+     - A Same-strike level edit moves a trigger that was still equal to the level.
+     - All Pair rules stay: opponent exit (squares off a filled order, cancels a pending one), FAILED cancels it, 15:15, Delete.
+     - At ⚡: no "price back below the level" warning (a stop-limit waits for the rise). It's refused when the LTP is already ≥ the trigger. **Switch to Stop-limit** in the limit-above-LTP popup now works on every card.
+     - Example: the 23 Nov 10:15 BEP cross 25500CE (BEP 167.57, LTP 156.60): Stop-limit sends `sl_order` trigger 167.57 → limit 168.57 and waits for the CE to rise back above its BEP.
    - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot. Merged 23 Nov 2026; the user confirmed the card shows correctly and plans the 1-lot live test on 24 Nov.
 
 ## AlgoDelta JSON used
@@ -273,7 +278,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #36: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #38: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

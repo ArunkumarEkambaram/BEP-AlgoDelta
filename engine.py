@@ -355,7 +355,7 @@ class Engine:
         r = self.watches[name].add_pair(ce_strike, pe_strike, ce_price, pe_price, buffer, tf, _now(), mode, trig_on)
         self.log(f"{name} Order Management: pair added {CommonWatch.pair_title(r)}, buffer {buffer:g}, {tf} min, "
                  f"trigger on {'live LTP' if trig_on == 'ltp' else 'candle close'}"
-                 + (", LIMIT order." if mode == "limit" else ", strategy order."))
+                 + (", STOP-LIMIT order." if mode == "stoplimit" else ", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
 
     def add_watch(self, name, strike, leg, price, tf, mode=None, trig_on="close"):
@@ -363,7 +363,7 @@ class Engine:
         self.log(f"{name} common price watch added: "
                  + ", ".join(f"{r['strike']}{r['opt']} @ {r['price']:g} ({r['tf']} min)" for r in rows)
                  + f", trigger on {'live LTP' if trig_on == 'ltp' else 'candle close'}"
-                 + (", LIMIT order." if mode == "limit" else ", strategy order."))
+                 + (", STOP-LIMIT order." if mode == "stoplimit" else ", LIMIT order." if mode == "limit" else ", strategy order."))
         self.bump("watch")
 
     def set_watch_mode(self, name, row_id, mode) -> bool:
@@ -372,16 +372,38 @@ class Engine:
         if ok:
             r = self.watches[name].get(row_id)
             what = CommonWatch.pair_title(r) if r.get("kind") == "pair" and not r.get("opt") else f"{r['strike']}{r['opt']}"
+            t, p = self.stop_prices(r)
             self.log(f"{name} {what}: order type " + (
-                "LIMIT" + (f" at {r['entry_price']:.2f}" if r.get("entry_price") else " at the fired leg's price")
-                if mode == "limit" else "strategy order") + ".")
+                ("STOP-LIMIT " + (f"trigger {t:.2f} limit {p:.2f}" if t else "at the fired leg's price")
+                 if mode == "stoplimit" else
+                 "LIMIT" + (f" at {r['entry_price']:.2f}" if r.get("entry_price") else " at the fired leg's price"))
+                if mode in ("limit", "stoplimit") else "strategy order") + ".")
             self.bump("watch")
         return ok
+
+    @staticmethod
+    def is_stop(r) -> bool:
+        """Stop-limit card (AlgoDelta sl_order): Manual with a trigger, or a card in Stop-limit mode."""
+        return r.get("entry_mode") == "limit" and bool(r.get("entry_trigger") or r.get("entry_stop"))
+
+    @staticmethod
+    def stop_prices(r):
+        """(trigger, limit) of a stop-limit card. The trigger defaults to the row's level (a Pair: the fired leg's
+        price, known once it fired), the limit to trigger + STOP_LIMIT_GAP. (None, None) while unknown."""
+        if not Engine.is_stop(r):
+            return None, None
+        t = r.get("entry_trigger") or (r.get("price") if r.get("source") != "manual" else None)
+        if not t:
+            return None, None
+        p = r.get("entry_price") if r.get("entry_trigger") else None
+        return round(float(t), 2), round(float(p) if p else float(t) + config.STOP_LIMIT_GAP, 2)
 
     @staticmethod
     def limit_price(r):
         """Price a limit card is sent at: its Entry Price, else the row's level (Pair: the fired leg's price).
         A Manual Entry card always has its own price."""
+        if Engine.is_stop(r):
+            return Engine.stop_prices(r)[1]
         p = r.get("entry_price")
         if not p and r.get("source") != "manual":
             p = r.get("price")
@@ -1167,7 +1189,7 @@ class Engine:
         ltp = self.row_live_ltp(name, r)
         if ltp is None:
             ltp = await self.quote_option(name, r["strike"], r["opt"])
-        trigger = r.get("entry_trigger") if r.get("source") == "manual" else None   # stop-limit (sl_order)
+        trigger = self.stop_prices(r)[0]                    # stop-limit (sl_order), any card
         sl, tgt, trail, app_rules = self._limit_rules(name, r)
         lots = self.row_qty(name, r)
         t = _stamp()
