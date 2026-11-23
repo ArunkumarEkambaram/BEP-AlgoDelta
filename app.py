@@ -591,17 +591,24 @@ def pair_cross_page():
 
 
 # ====================================================================== Order Management (common price + stars)
-def rule_dialog(title, kind, current, on_save, on_cancel=None):
+def rule_dialog(title, kind, current, on_save, on_cancel=None, allow_none=False):
     """Popup to set an SL / Target rule: Type LTP / POINT / CANDLE, Time frame (CANDLE), Value.
+    allow_none (Target only, PR #48): adds Type "None" = no target for this order (Setup default unchanged).
     Created on the page layout (not inside the row) so a row redraw during a scan cannot close it."""
     with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 380px"):
         ui.label(title).classes("text-lg font-bold")
-        typ = ui.select(list(exit_rules.TYPES), value=(current or {}).get("type", "CANDLE"),
+        types = {t: t for t in exit_rules.TYPES}
+        if allow_none and kind == "tgt":
+            types[exit_rules.NONE] = "None"
+        cur_type = (current or {}).get("type", "CANDLE")
+        typ = ui.select(types, value=cur_type if cur_type in types else "CANDLE",
                         label="Type").classes("w-full")
         tf = ui.select({1: "1 Min", 3: "3 Min", 5: "5 Min"}, value=(current or {}).get("tf") or 5,
                        label="Time frame").classes("w-full")
         tf.bind_visibility_from(typ, "value", lambda v: v == "CANDLE")
-        val = ui.number("Value", value=(current or {}).get("value"), min=0, step=0.05).classes("w-full")
+        val = ui.number("Value", value=(current or {}).get("value") if cur_type != exit_rules.NONE else None,
+                        min=0, step=0.05).classes("w-full")
+        val.bind_visibility_from(typ, "value", lambda v: v != exit_rules.NONE)
         hint = ui.label("").classes("text-xs opacity-70")
 
         def explain(_=None):
@@ -609,13 +616,19 @@ def rule_dialog(title, kind, current, on_save, on_cancel=None):
             sign = "entry \u2212 value" if kind == "sl" else "entry + value"
             hint.set_text({"CANDLE": f"Exit when a {tf.value}-min candle CLOSES {side} the value (a wick does not exit).",
                            "LTP": "The value is a price; exit when the price touches it.",
-                           "POINT": f"The value is points from entry ({sign})."
+                           "POINT": f"The value is points from entry ({sign}).",
+                           exit_rules.NONE: "No target for this order: it exits by the SL, the trailing SL, a manual "
+                                            "square-off or 15:15. The Setup default target is not changed."
                            }[typ.value])
         typ.on_value_change(explain)
         tf.on_value_change(explain)
         explain()
 
         def save():
+            if typ.value == exit_rules.NONE:
+                on_save(exit_rules.make_rule(kind, exit_rules.NONE, 0))
+                dlg.close()
+                return
             if val.value is None or float(val.value) <= 0:
                 ui.notify("Value must be above 0.", type="negative")
                 return
@@ -636,7 +649,7 @@ def rule_dialog(title, kind, current, on_save, on_cancel=None):
     dlg.open()
 
 
-def rule_toggle(label, kind, current, default_text, locked, on_set):
+def rule_toggle(label, kind, current, default_text, locked, on_set, allow_none=False):
     """Switch + summary. ON opens the popup; OFF goes back to the default. Click the summary to edit."""
     rule = exit_rules.parse(current)
     with ui.row().classes("items-center gap-1 no-wrap"):
@@ -647,12 +660,13 @@ def rule_toggle(label, kind, current, default_text, locked, on_set):
         def changed(ev):
             if ev.value and not exit_rules.parse(current):
                 rule_dialog(f"Add {'StopLoss' if kind == 'sl' else 'Target'}", kind, None, on_set,
-                            on_cancel=lambda: sw.set_value(False))
+                            on_cancel=lambda: sw.set_value(False), allow_none=allow_none)
             elif not ev.value and exit_rules.parse(current):
                 on_set(None)
         sw.on_value_change(changed)
         if rule and not locked:
-            summary.on("click", lambda: rule_dialog(f"Edit {'StopLoss' if kind == 'sl' else 'Target'}", kind, rule, on_set))
+            summary.on("click", lambda: rule_dialog(f"Edit {'StopLoss' if kind == 'sl' else 'Target'}", kind, rule, on_set,
+                                                    allow_none=allow_none))
         if locked:
             sw.disable()
 
@@ -672,7 +686,8 @@ def sl_tgt_cell(name, r):
         return on_set
     with ui.column().classes("gap-0"):
         rule_toggle("SL", "sl", r.get("c_sl"), f"Setup {cfg['sl']:g} {cfg['sl_type']}", locked, setter("sl"))
-        rule_toggle("Target", "tgt", r.get("c_tgt"), f"Default {t_val:g} {t_type}", locked, setter("tgt"))
+        rule_toggle("Target", "tgt", r.get("c_tgt"), f"Default {t_val:g} {t_type}", locked, setter("tgt"),
+                    allow_none=True)
 
 
 def section(title, icon, rows, empty_text, place, name):
@@ -1001,6 +1016,7 @@ def card_rule_box(name, r, kind, locked):
         prm = trade_tracker._params(order)
         if prm.get(kind) is not None:
             d_type, d_val = prm[kind + "_type"], prm[kind]
+    sent_none = bool(order) and not m and kind == "tgt" and exit_rules.is_none(rule)   # PR #48: sent with no target
 
     def on_set(new_rule):
         if engine.watches[name].set_custom(r["id"], kind, new_rule):
@@ -1021,11 +1037,13 @@ def card_rule_box(name, r, kind, locked):
             with ui.row().classes("items-center gap-1 no-wrap"):
                 if o_rule:
                     ui.icon("candlestick_chart" if o_rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
-                v = ui.label(f"{o_rule['value']:.2f}" if o_rule else ("--" if m else f"{d_val:g} {d_type}")) \
+                v = ui.label(f"{o_rule['value']:.2f}" if o_rule else
+                             ("--" if m else ("None" if sent_none else f"{d_val:g} {d_type}"))) \
                     .classes("text-lg font-bold")
                 if editable:
                     v.classes("cursor-pointer")
-                    v.on("click", lambda: rule_dialog(f"{what} (app-watched)", kind, o_rule, on_order_set))
+                    v.on("click", lambda: rule_dialog(f"{what} (app-watched)", kind, o_rule, on_order_set,
+                                                      allow_none=bool(m)))
                     if o_rule:
                         ui.button(icon="close", on_click=lambda: on_order_set(None)) \
                             .props("flat dense round size=xs color=red") \
@@ -1039,18 +1057,20 @@ def card_rule_box(name, r, kind, locked):
                 ui.label(sub + " \u00b7 app").classes("text-xs text-amber-5")
                 return
             ui.label(exit_rules.describe(o_rule) + " \u00b7 app" if o_rule else
-                     "as sent" + (" \u00b7 click to add an app rule" if editable else "")) \
+                     ("no target (trail / SL only)" if sent_none else "as sent")
+                     + (" \u00b7 click to add an app rule" if editable else "")) \
                 .classes("text-xs " + ("text-amber-5" if o_rule else "opacity-60"))
         return
 
     with card_box(what, "edit" if rule and not locked else None):
         if rule:
             with ui.row().classes("items-center gap-1 no-wrap"):
-                ui.icon("candlestick_chart" if rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
-                v = ui.label(f"{rule['value']:.2f}").classes("text-lg font-bold")
+                ui.icon("block" if exit_rules.is_none(rule) else
+                        "candlestick_chart" if rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
+                v = ui.label("None" if exit_rules.is_none(rule) else f"{rule['value']:.2f}").classes("text-lg font-bold")
                 if not locked:
                     v.classes("cursor-pointer")
-                    v.on("click", lambda: rule_dialog(f"Edit {what}", kind, rule, on_set))
+                    v.on("click", lambda: rule_dialog(f"Edit {what}", kind, rule, on_set, allow_none=True))
                     ui.button(icon="close", on_click=lambda: on_set(None)) \
                         .props("flat dense round size=xs color=red").tooltip("Back to default")
             ui.label(exit_rules.describe(rule)).classes("text-xs text-amber-5")
@@ -1066,7 +1086,7 @@ def card_rule_box(name, r, kind, locked):
                 ui.label(sub).classes("text-xs " + ("text-amber-5" if m else "opacity-60"))
             else:
                 ui.label(f"Set {what}").classes("text-blue-5 font-medium cursor-pointer") \
-                    .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set))
+                    .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set, allow_none=True))
                 ui.label(f"Default {d_val:g} {d_type} (Setup)").classes("text-xs opacity-60")
 
 
@@ -1740,6 +1760,9 @@ def make_place(name):
             if lvl and ltp is not None and ltp < float(lvl):     # (a stop-limit waits for the rise: no warning)
                 warns.append(f"The price is already back below the {level_name(r)} {float(lvl):g} "
                              f"(LTP {ltp:.2f}): the setup may have failed.")
+            if exit_rules.is_none(exit_rules.parse(r.get("c_tgt"))) and not engine.row_trail(name, r)["on"]:
+                warns.append("Target is None and the trailing SL is OFF: this order exits only by the SL, a manual "
+                             "square-off or 15:15.")                  # PR #48
             if warns:
                 confirm_warnings("Check before placing", warns, checked, "Place anyway")
                 return
@@ -2040,14 +2063,25 @@ def manual_page():
                 with ui.column().classes("gap-0 items-start"):
                     ui.label("LTP").classes("text-xs opacity-70")
                     ltp_lbl = ui.label("--").classes("text-lg font-bold")
+                with ui.column().classes("gap-0 items-start"):     # PR #48: the strike's BEP, shown only (no check)
+                    ui.label("BEP").classes("text-xs opacity-70")
+                    with ui.row().classes("items-baseline gap-1 no-wrap"):
+                        bep_lbl = ui.label("--").classes("text-lg font-bold")
+                        gap_lbl = ui.label("").classes("text-sm")
 
-            async def get_ltp(_e=None, name=name, strike=strike, opt=opt, ltp_lbl=ltp_lbl, price=price, mode=mode):
+            async def get_ltp(_e=None, name=name, strike=strike, opt=opt, ltp_lbl=ltp_lbl, price=price, mode=mode,
+                              bep_lbl=bep_lbl, gap_lbl=gap_lbl):
                 try:
                     k = int(strike.value)
                 except (TypeError, ValueError):
                     return None
                 v = await engine.quote_option(name, k, opt.value)
                 ltp_lbl.set_text(f"{v:.2f}" if v is not None else "--")
+                b = await engine.row_bep(name, {"source": "manual", "strike": k, "opt": opt.value})
+                bep_lbl.set_text(f"{b:.2f}" if b is not None else "--")
+                d = round(v - b, 2) if v is not None and b is not None else None
+                gap_lbl.set_text("" if d is None else f"({d:+.2f})")
+                gap_lbl.classes(replace="text-sm " + ("" if d is None else "text-green-5" if d >= 0 else "text-red-5"))
                 if v is not None and not price.value and mode.value in ("price", "limit"):   # Stop-limit: the
                     price.set_value(v)                    # trigger must be above the LTP, so you type it
                 return v
@@ -2104,6 +2138,7 @@ def manual_page():
                 ui.button("Add & place", icon="bolt", on_click=add_and_place).props("color=green")
                 ui.label("Add card lets you set Target / SL / Trailing first; Add & place uses the defaults.") \
                     .classes("text-xs opacity-60")
+            ui.timer(0.5, get_ltp, once=True)              # LTP + BEP once when the page opens (PR #48)
 
         def draw(place, live, compact, name=name):
             rows = om_rows("manual", name)
@@ -2179,7 +2214,8 @@ def orders_page():
                 else (lambda k: r.get("c_" + k))
             rule_toggle("SL", "sl", cur_rule("sl"), "none" if lim else f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}",
                         False, setter("sl"))
-            rule_toggle("Target", "tgt", cur_rule("tgt"), "none" if lim else "Common (as sent)", False, setter("tgt"))
+            rule_toggle("Target", "tgt", cur_rule("tgt"), "none" if lim else "Common (as sent)", False, setter("tgt"),
+                        allow_none=lim)
             t = engine.order_trail(r)
 
             def open_trail():

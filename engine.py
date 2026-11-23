@@ -705,6 +705,9 @@ class Engine:
             rule = exit_rules.parse(r.get("c_" + k))
             if not rule:
                 continue
+            if exit_rules.is_none(rule):              # Target None (PR #48): AlgoDelta holds no target
+                params["is_" + k] = False
+                continue
             if rule["type"] == "CANDLE":              # watched by the app -> AlgoDelta must not hold its own
                 params["is_" + k] = False
                 app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
@@ -1145,7 +1148,9 @@ class Engine:
                     rule = exit_rules.make_rule(k, t if t in ("LTP", "POINT") else "POINT", float(v), custom=False)
                 except (TypeError, ValueError):
                     rule = None
-            if rule and rule["type"] == "CANDLE":
+            if exit_rules.is_none(rule):              # Target None (PR #48): no app target
+                out[k] = None
+            elif rule and rule["type"] == "CANDLE":
                 app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
                 out[k] = None
             else:
@@ -1517,6 +1522,8 @@ class Engine:
         """The SL / Target rule an order is watched with now (dict or None): its app rule (c_sl / c_tgt); for a
         limit / stop-limit order also the LTP / POINT rule kept in mg."""
         rule = exit_rules.parse(o.get("c_" + kind))
+        if exit_rules.is_none(rule):
+            rule = None
         m = limit_orders.parse(o.get("mg"))
         if rule is None and m and m.get(kind):
             rule = exit_rules.make_rule(kind, m[kind]["type"], m[kind]["value"], custom=False)
@@ -1534,6 +1541,8 @@ class Engine:
         """Limit / stop-limit order: replaces its SL / Target. LTP / POINT go to mg (live LTP check), CANDLE to
         c_sl / c_tgt (candle closes); None removes it."""
         m = limit_orders.parse(o["mg"])
+        if exit_rules.is_none(rule):                  # Target None = no target, the same as removing it
+            rule = None
         m[kind] = {"type": rule["type"], "value": float(rule["value"])} if rule and rule["type"] != "CANDLE" else None
         o["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule and rule["type"] == "CANDLE" else ""
         self._limit_save(o, m)
