@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #43; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #44; PR #45 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -256,6 +256,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - A Same-strike level edit moves a trigger that was still equal to the level.
      - All Pair rules stay: opponent exit (squares off a filled order, cancels a pending one), FAILED cancels it, 15:15, Delete.
      - At ⚡: no "price back below the level" warning (a stop-limit waits for the rise). It's refused when the LTP is already ≥ the trigger. **Switch to Stop-limit** in the limit-above-LTP popup now works on every card.
+     - **Trigger / limit popup (PR #45, user request 23 Nov):** choosing Stop-limit on a card (or in the Compact Order popup) opens **"Stop-limit — strike"** with the live LTP and the level / BEP, **Trigger (LTP rises to)** and **Limit price**. The trigger starts at the level only when it's above the LTP, otherwise empty with "must be above the LTP x (the BEP y is already below it)"; the limit follows as trigger + 1. Save checks trigger > LTP and limit ≥ trigger; Cancel keeps the old type. The card shows `trigger → limit` as a clickable label that reopens the popup (no inline boxes). A Pair not fired yet may stay empty (= the fired leg's price at ⚡). `stoplimit_dialog` in `app.py`. Why: a ⭐ at 12:50 (BEP 137.32, LTP 151.95) took the BEP as the trigger, which ⚡ would refuse.
      - Example: the 23 Nov 10:15 BEP cross 25500CE (BEP 167.57, LTP 156.60): Stop-limit sends `sl_order` trigger 167.57 → limit 168.57 and waits for the CE to rise back above its BEP.
      - Merged 23 Nov 2026; the user confirmed Stop-limit shows on Pair cards.
    - **Manual Entry default = Stop-limit (PR #40, user request 23 Nov):** the form opens on Stop-limit. The trigger is **not** pre-filled (it must be above the LTP; the LTP shows beside it); typing it fills the limit = trigger + 1. The LTP pre-fill of the price box now applies only to Price / Limit.
@@ -286,7 +287,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #43: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #45: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

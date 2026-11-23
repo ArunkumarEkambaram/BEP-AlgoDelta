@@ -752,6 +752,72 @@ def order_type_cell(name, r):
         lbl.tooltip("Click to choose Strategy, Limit or Stop-limit")
 
 
+def stoplimit_dialog(name, r, on_cancel=None):
+    """Stop-limit trigger / limit popup for a Same strike / Pair / \u2b50 card (PR #45). The trigger must be above
+    the live LTP; it starts at the card's level (BEP) only when that is above the LTP. A Pair that has not fired
+    may stay empty = the fired leg's price at \u26a1."""
+    pair_unfired = r.get("kind") == "pair" and not r.get("opt")
+    ltp = None if pair_unfired else engine.row_live_ltp(name, r)
+    level = None if pair_unfired else (float(r["price"]) if r.get("price") else None)
+    t0, p0 = engine.stop_prices(r) if engine.is_stop(r) else (None, None)
+    if t0 is None and level is not None and (ltp is None or level > ltp):
+        t0 = level
+    if t0 is not None and p0 is None:
+        p0 = round(t0 + config.STOP_LIMIT_GAP, 2)
+    state = {"saved": False}
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 400px"):
+        what = CommonWatch.pair_title(r) if r.get("kind") == "pair" else f"{r['strike']}{r['opt']}"
+        ui.label(f"Stop-limit \u2014 {what}").classes("text-lg font-bold")
+        ui.label(("LTP " + (f"{ltp:.2f}" if ltp is not None else "--")) +
+                 (f" \u00b7 {level_name(r)} {level:.2f}" if level is not None else "")).classes("text-sm")
+        trg = ui.number("Trigger (LTP rises to)", value=t0, min=0, step=0.05).classes("w-full")
+        lim = ui.number("Limit price (most you pay)", value=p0, min=0, step=0.05).classes("w-full")
+        if pair_unfired:
+            note = "Not fired yet: leave both empty to use the fired leg's price (trigger) + " \
+                   f"{config.STOP_LIMIT_GAP:g} (limit) at \u26a1."
+        elif ltp is not None:
+            note = f"The trigger must be above the LTP {ltp:.2f}" + (
+                f" (the {level_name(r)} {level:.2f} is already below it)." if level is not None and level <= ltp else ".")
+        else:
+            note = "No live LTP yet: the trigger is checked against the LTP again at \u26a1."
+        ui.label(note).classes("text-xs text-amber-5")
+        err = ui.label("").classes("text-xs text-red-5")
+
+        def trigger_set(_e=None):
+            if trg.value:
+                lim.set_value(round(float(trg.value) + config.STOP_LIMIT_GAP, 2))
+        trg.on("blur", trigger_set)
+
+        def save():
+            if pair_unfired and trg.value is None and lim.value is None:
+                engine.set_watch_mode(name, r["id"], "stoplimit")
+            else:
+                try:
+                    t, p = float(trg.value), float(lim.value)
+                except (TypeError, ValueError):
+                    err.set_text("Enter the trigger and the limit price.")
+                    return
+                if t <= 0 or p < t:
+                    err.set_text("The limit must be at or above the trigger (both above 0).")
+                    return
+                if ltp is not None and t <= ltp:
+                    err.set_text(f"The trigger must be above the LTP {ltp:.2f}.")
+                    return
+                if not engine.is_stop(r):
+                    engine.set_watch_mode(name, r["id"], "stoplimit")
+                engine.set_stoplimit(name, r["id"], t, p)
+            state["saved"] = True
+            dlg.close()
+
+        def cancel():
+            dlg.close()
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=cancel).props("flat")
+            ui.button("Save", on_click=save)
+    dlg.on("hide", lambda: (on_cancel() if on_cancel and not state["saved"] else None))
+    dlg.open()
+
+
 def order_type_dialog(name, r):
     """Strategy (strategy_order) or Limit (limit_order at a price; SL / Target watched by the app)."""
     pair_unfired = r.get("kind") == "pair" and not r.get("opt")
@@ -765,7 +831,7 @@ def order_type_dialog(name, r):
         ui.label("Strategy = AlgoDelta strategy_order (market; AlgoDelta holds SL / Target / trailing). "
                  "Limit = AlgoDelta limit_order: buy at the price or cheaper (fills at once if the LTP is already "
                  "below it). Stop-limit = AlgoDelta sl_order: waits at the exchange until the LTP RISES to the "
-                 f"level (trigger), then a limit at trigger + {config.STOP_LIMIT_GAP:g}; edit both on the card. "
+                 "trigger (asked next, above the LTP), then a limit at the limit price. "
                  "For Limit / Stop-limit the SL / Target / trailing are watched by this app (square-off when hit); "
                  "cancelled if the card fails, at 15:15 or when deleted.").classes("text-xs opacity-70")
 
@@ -773,6 +839,10 @@ def order_type_dialog(name, r):
             limit = mode.value == "limit"
             if limit and price.value is not None and float(price.value) <= 0:
                 ui.notify("The limit price must be above 0.", type="negative")
+                return
+            if mode.value == "stoplimit":              # trigger / limit popup (PR #45)
+                dlg.close()
+                stoplimit_dialog(name, r)
                 return
             engine.set_watch_mode(name, r["id"], mode.value if mode.value != "strategy" else None)
             if limit and price.value:
@@ -1337,34 +1407,20 @@ def entry_price_box(name, r, pending):
         return
     if r.get("source") != "manual":                   # Same strike / Pair / \u2b50: Strategy or Limit
         tg = ui.toggle({"strategy": "Strategy", "limit": "Limit", "stoplimit": "Stop-limit"}, value=card_mode(r)).props("dense no-caps size=sm")
-        tg.on_value_change(lambda e: engine.set_watch_mode(name, r["id"], e.value if e.value != "strategy" else None))
+        def mode_changed(e, tg=tg):
+            if e.value == card_mode(r):
+                return
+            if e.value == "stoplimit":                # ask the trigger / limit first (PR #45)
+                stoplimit_dialog(name, r, on_cancel=lambda: tg.set_value(card_mode(r)))
+                return
+            engine.set_watch_mode(name, r["id"], e.value if e.value != "strategy" else None)
+        tg.on_value_change(mode_changed)
     if engine.is_stop(r):                             # stop-limit (AlgoDelta sl_order): trigger + limit
         t0, p0 = engine.stop_prices(r)
-        with ui.row().classes("items-center gap-1 no-wrap"):
-            trg = ui.number(value=t0, min=0.05, step=0.05, placeholder="leg") \
-                .props("dense borderless input-class=text-center").classes("w-16 text-base font-bold") \
-                .tooltip("Trigger: the order waits at the exchange until the LTP rises to this")
-            ui.label("\u2192").classes("opacity-60")
-            lim = ui.number(value=p0, min=0.05, step=0.05, placeholder="+%g" % config.STOP_LIMIT_GAP) \
-                .props("dense borderless input-class=text-center").classes("w-16 text-base font-bold") \
-                .tooltip("Limit: the most you pay once triggered")
-
-        def save_stop(_e=None):
-            try:
-                t, p = float(trg.value), float(lim.value)
-            except (TypeError, ValueError):
-                t = p = 0
-            if t <= 0 or p < t:
-                if trg.value is None and lim.value is None:
-                    return                                 # Pair not fired yet: both follow the fired leg
-                ui.notify("Stop-limit: trigger above 0 and limit at or above the trigger.", type="warning")
-                trg.set_value(t0)
-                lim.set_value(p0)
-                return
-            engine.set_stoplimit(name, r["id"], t, p)
-        for w in (trg, lim):
-            w.on("blur", save_stop)
-            w.on("keydown.enter", save_stop)
+        lbl = ui.label(f"{t0:.2f} \u2192 {p0:.2f}" if t0 else "leg \u2192 +%g" % config.STOP_LIMIT_GAP) \
+            .classes("text-base font-bold cursor-pointer underline decoration-dotted whitespace-nowrap") \
+            .tooltip("Click to change the trigger / limit")
+        lbl.on("click", lambda: stoplimit_dialog(name, r))
         ui.label("STOP-LIMIT at \u26a1: trigger \u2192 limit" if t0 else "STOP-LIMIT at the fired leg's price") \
             .classes("text-xs text-amber-5")
         return
