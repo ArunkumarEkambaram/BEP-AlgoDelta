@@ -200,7 +200,12 @@ class BepMonitor:
                 "trigger": float(cfg.get("trail_trigger", 20)), "gap": float(cfg.get("trail_gap", 20)),
                 "step": float(cfg.get("trail_point") or 1), "set_at": now.strftime("%H:%M:%S"), "high": None,
                 "done": ""})
-        return {"params": {"is_sl": False}, "app_rules": app_rules}
+        max_sl = float(cfg.get("open_max_sl", 17) or 0)
+        if max_sl > 0:          # PR #47: AlgoDelta holds a POINT SL (entry - max_sl) as a backstop; the app keeps the trail
+            params = {"sl": max_sl, "sl_type": "POINT", "trail": False}
+        else:
+            params = {"is_sl": False}
+        return {"params": params, "app_rules": app_rules}
 
     # ------------------------------------------------------------------ 09:15 opening order
     def prepare_opening(self, client, index_ltp: float, now, log_fn) -> bool:
@@ -305,8 +310,10 @@ class BepMonitor:
                 cfg = config.AUTO_ORDER.get(self.name, {})
                 log_fn(f"BEP {self.name} opening candle: {opt} {strike} crossed BEP {level:.2f} + "
                        f"{float(cfg.get('open_entry_above', 2) or 0):g} (LTP {ltp:.2f}); SL = {cfg.get('open_sl_tf', 5)}-min "
-                       f"close below {level - float(cfg.get('open_sl_below', 2) or 0):.2f} (app-watched) "
-                       f"- order signal queued; no more {opt} orders today"
+                       f"close below {level - float(cfg.get('open_sl_below', 2) or 0):.2f} (app-watched)"
+                       + (f", max SL {float(cfg.get('open_max_sl', 17) or 0):g} pts below the fill (AlgoDelta)"
+                          if float(cfg.get('open_max_sl', 17) or 0) > 0 else "")
+                       + f" - order signal queued; no more {opt} orders today"
                        + (f" (also qualified, skipped: {others})" if others else ""))
 
     def plan_text(self, day: str = None) -> str:
