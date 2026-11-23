@@ -490,6 +490,8 @@ class CommonWatch:
 
     @staticmethod
     def pair_title(r) -> str:
+        if r.get("auto") == "cross":                       # BEP Pair cross row: the prices are the legs' BEPs
+            return f"{r['ce_strike']}CE / {r['pe_strike']}PE · BEP {r['ce_price']:.2f} / {r['pe_price']:.2f}"
         pe = "" if r["pe_price"] == r["ce_price"] else f" (PE @ {r['pe_price']:g})"
         return f"{r['ce_strike']}CE / {r['pe_strike']}PE @ {r['ce_price']:g}{pe}"
 

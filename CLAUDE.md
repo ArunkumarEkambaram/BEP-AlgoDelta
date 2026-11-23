@@ -230,6 +230,11 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - Alerts of one type in one scan are merged into **one** toast (e.g. `⭐ Support PE: 26200, 26100, 26050 · touch and go`).
    - The browser notification shows the same short text; the **full** labels still go to the Log.
    - Other toasts (order results, form messages) keep their text but use the same position and size.
+27. **BEP box on BEP cross Pair cards (PR #36):** the user wants the BEP next to the live LTP, to compare.
+   - Rows added by a BEP cross (`auto` = "cross") name the level box **BEP** (not "Pair price"): `CE 137.32` / `PE 126.15` on two lines, each with its live **LTP − BEP** (`+9.03 above` green / `-23.35 below` red, the 2 s LTP batch, `cross_bep_gaps`).
+   - The header chip / Compact Pair column read `25600CE / 25650PE · BEP 137.32 / 126.15` (`CommonWatch.pair_title`).
+   - Pair cards (all) show the LTP as `CE x` / `PE y` on two lines (the one-line text overlapped the next box).
+   - Manual Pair rows keep "Pair price" (the user's own levels).
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.

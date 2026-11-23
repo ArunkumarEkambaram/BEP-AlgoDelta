@@ -710,6 +710,8 @@ LEVEL_NAME = {"star": "BEP", "pair": "Pair price", "manual": "Order type"}
 
 def level_name(r) -> str:
     """Heading of a card's level box: Common price (Same strike) / Pair price / BEP (\u2b50) / Order type (Manual)."""
+    if r.get("auto") == "cross":                       # BEP Pair cross row: the Pair prices are the legs' BEPs
+        return "BEP"
     return LEVEL_NAME.get(r.get("source"), "Common price")
 
 
@@ -875,6 +877,16 @@ def card_ltp_text(name, r) -> str:
     if v is None and r.get("last_close") is not None:
         return f"{r['last_close']:.2f}*"            # * = last candle close until a live LTP arrives
     return f"{v:.2f}" if v is not None else "--"
+
+
+def cross_bep_gaps(name, r):
+    """BEP cross Pair card: live LTP minus BEP for the CE and the PE leg (None until an LTP arrives)."""
+    lt = engine.option_ltp
+    out = []
+    for opt, strike, bep_ in (("CE", r["ce_strike"], r["ce_price"]), ("PE", r["pe_strike"], r["pe_price"])):
+        v = lt.get((name, int(strike), opt))
+        out.append((opt, None if v is None else round(v - bep_, 2)))
+    return out
 
 
 def card_box(title, icon=None):
@@ -1413,7 +1425,8 @@ def order_card(name, r, place, live):
                 pnl_lbl = ui.label("--").classes("text-lg font-bold")
                 pts_lbl = ui.label("").classes("text-xs opacity-70")
             with card_box("LTP"):
-                ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
+                ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-pre-line text-center leading-tight")
+            gap_row = None
             if r.get("source") == "manual":
                 with card_box(level_name(r)):
                     mt = manual_type(r)
@@ -1421,6 +1434,14 @@ def order_card(name, r, place, live):
                     ui.label({"Limit": "SL / Target by the app", "Price": "waits for the price, then market",
                               "Market": "market order at \u26a1"}[mt]).classes(
                         "text-xs " + ("text-amber-5" if mt == "Limit" else "opacity-60"))
+            elif r.get("auto") == "cross":                 # BEP Pair cross row: each leg's BEP and live LTP - BEP
+                with card_box("BEP"):
+                    gap_row = []
+                    for o in ("CE", "PE"):
+                        with ui.row().classes("items-center gap-2 no-wrap"):
+                            ui.label(f"{o} {r[o.lower() + '_price']:.2f}").classes("text-base font-bold whitespace-nowrap")
+                            gap_row.append(ui.label("").classes("text-xs font-bold whitespace-nowrap"))
+                    ui.label(f"{r['opt']} closed above · {r['tf']} min · buffer {r['buffer']:g}").classes("text-xs opacity-60")
             else:
                 with card_box(level_name(r)):
                     with ui.row().classes("items-center gap-1 no-wrap"):
@@ -1454,7 +1475,12 @@ def order_card(name, r, place, live):
 
     def refresh():
         o = engine.row_order(r)
-        ltp_lbl.set_text(card_ltp_text(name, r))
+        ltp_lbl.set_text(card_ltp_text(name, r).replace(" · ", "\n"))   # pair: CE and PE on two lines
+        if gap_row is not None:
+            for lbl, (opt, gap) in zip(gap_row, cross_bep_gaps(name, r)):
+                lbl.set_text("--" if gap is None else f"{gap:+.2f} {'above' if gap >= 0 else 'below'}")
+                lbl.classes(remove="text-green-5 text-red-5 opacity-60")
+                lbl.classes(add="opacity-60" if gap is None else ("text-green-5" if gap >= 0 else "text-red-5"))
         mo = limit_orders.parse(o.get("mg")) if o else None
         if entry_lbl is not None:
             entry = o.get("entry") if o else None
