@@ -110,6 +110,10 @@ CSS = """
   .q-card { border-radius: 12px; }
   .nav-item { border-radius: 8px; margin: 2px 8px; }
   .nav-active { background: rgba(59,130,246,.18); color: #60a5fa; font-weight: 600; }
+  /* alerts (PR #36): small toasts top-right, below the header */
+  .q-notifications__list--top.items-end { top: 60px; }
+  .bep-toast { max-width: 360px; min-width: 0; font-size: 13px; white-space: pre-line; padding: 4px 10px; }
+  .bep-toast .q-notification__actions .q-btn { color: #fff !important; min-height: 0; padding: 0 4px; }
   .nav-sub { margin-left: 24px; min-height: 36px; white-space: nowrap; }
   .nav-group-active { color: #60a5fa; font-weight: 600; }
   .stat-label { font-size: 12px; opacity: .65; text-transform: uppercase; letter-spacing: .04em; }
@@ -255,7 +259,8 @@ def root():
             if seq <= seen["seq"]:
                 continue
             seen["seq"] = seq
-            ui.notify(e["msg"], type=e["type"], position="top", timeout=12000, multi_line=True)
+            ui.notify(e["msg"], type=e["type"], position="top-right", timeout=8000,
+                      close_button="✕", classes="bep-toast")
             if e.get("title"):
                 ui.run_javascript(f'if (Notification.permission === "granted") '
                                   f'{{ new Notification({json.dumps(e["title"])}, {{ body: {json.dumps(e["msg"])} }}); }}')

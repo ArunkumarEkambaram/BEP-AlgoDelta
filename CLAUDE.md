@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #34; PR #35 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #35; PR #36 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -206,7 +206,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Pairs:** ATM = the strike nearest NIFTY's close of that candle.
      - **Buy CE:** the leg above (the one to buy) is the CE at ATM or up to **2 strikes ITM** (ATM − 50, ATM − 100; `BEP_CROSS_ITM_STRIKES` = 2, PR #35; it was 1); the opponent below is the PE at ATM − 50, ATM or ATM + 50.
      - **Buy PE:** the leg above is the PE at ATM or up to 2 strikes ITM (ATM + 50, ATM + 100); the opponent is the CE at ATM ± 50.
-     - **Why 2 (PR #35):** on 20 Nov at 09:40, 25400CE closed above its BEP and 25450PE below, but NIFTY was about 25,485 (ATM 25500), so 25400 was 2 strikes ITM and was never checked.
+     - **Why 2 (PR #35):** on 20 Nov at 09:40, 25400CE closed above its BEP and 25450PE below, but NIFTY was about 25,485 (ATM 25500), so 25400 was 2 strikes ITM and was never checked. The user confirmed on the 20 Nov replay (after PR #35) that the 09:40 row now shows.
    - **Signal:** the up-leg closes > its BEP **and** the down-leg closes < its BEP, and the previous candle wasn't in that state. Either leg may have crossed first (e.g. PE below at 09:40, CE above at 09:45). A pair already split on the first candle counts. No margin past BEP.
    - **Touch (user request):** both legs must have **touched** their BEP (low ≤ BEP + `BEP_CROSS_TOUCH_TOL` = 1 and high ≥ BEP − 1) on the signal candle or the 2 before (`BEP_CROSS_TOUCH_CANDLES` = 3). A leg far away from its BEP doesn't count.
    - **Labels (PR #35, the user is an option buyer and never shorts):** the Signal column shows a **Buy CE** (green) / **Buy PE** (red) badge (no ↑/↓ arrows); the columns are "Buy leg (closed above BEP)" and "Opponent (closed below BEP)"; Pts since / Best are for the **buy leg only**; alerts read "BUY 25400CE … | opponent 25450PE …".
@@ -223,6 +223,13 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - It rebuilds the Support board and the Pair cross from Upstox **historical** candles in a separate monitor: no alerts, no ⭐ / Pair rows, no orders, and the live scan keeps running. "Back to live" returns. Downloads include "_replay".
      - Only days since the last expiry (older contracts aren't listed). The CSV must be **that day's** file; calculated = (CE + PE) / 2 of the previous day's closes (`fetch_close_before`, 2 calls per strike, ATM windows only).
      - Not available on non-trading days for "today": the board only reads today's intraday candles, so on a weekend the live board is empty (the user asked on Sat 21 Nov).
+
+26. **Short toasts, top-right (PR #36):** the user said the long toasts covered the screen at the moment of the signal.
+   - Toasts are top-right below the header, max 360 px wide, shown for 8 s, with a ✕ (`app.py` `pump_events`, CSS `.bep-toast`).
+   - The text is short: `⭐ Support 26200PE · touch and go`, `Pair cross: BUY 25950PE · opp 25900CE`, `Pair 25450CE/25450PE: CE triggered → Place order` (`notifier.support_short` / `cross_short` / `common_short`). BEP, close and time are in the tables.
+   - Alerts of one type in one scan are merged into **one** toast (e.g. `⭐ Support PE: 26200, 26100, 26050 · touch and go`).
+   - The browser notification shows the same short text; the **full** labels still go to the Log.
+   - Other toasts (order results, form messages) keep their text but use the same position and size.
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
@@ -248,7 +255,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #35: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #36: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

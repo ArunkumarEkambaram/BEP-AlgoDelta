@@ -617,10 +617,9 @@ class Engine:
             fired, changed = self.watches[name].live_step(
                 lambda strike, opt, name=name: self.option_ltp.get((name, int(strike), opt)), now)
             for r in fired:
-                label = notifier.common_label(r)
-                self.log("COMMON PRICE (live LTP): " + label)
-                if not config.ALERTS_PAUSED:
-                    self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
+                self.log("COMMON PRICE (live LTP): " + notifier.common_label(r))
+            if fired and not config.ALERTS_PAUSED:
+                self.notify("\n".join(notifier.common_short(r) for r in fired), "positive", f"{name} Order Management")
             if changed:
                 self.bump("watch")
 
@@ -786,13 +785,14 @@ class Engine:
     def _cross_signals(self, name, signals) -> bool:
         """Live BEP Pair cross signals: alert (unless paused) and add a TRIGGERED Pair row to Order Management."""
         added = False
-        for sig in signals or []:
-            label = notifier.cross_label(sig)
-            self.log(label)
+        signals = signals or []
+        if signals:
             if config.ALERTS_PAUSED:
-                self.log("Alerts paused: BEP Pair cross alert not shown.")
-            else:
-                self.notify(label, "positive", f"{name} BEP Pair cross {sig['up']['strike']}{sig['up']['opt']}")
+                self.log(f"Alerts paused: {len(signals)} BEP Pair cross alert(s) not shown.")
+            else:                                          # one short toast per scan; full text in the Log
+                self.notify("\n".join(notifier.cross_short(s) for s in signals), "positive", f"{name} BEP Pair cross")
+        for sig in signals:
+            self.log(notifier.cross_label(sig))
             if not getattr(config, "BEP_CROSS_ADD_PAIR", True):
                 continue
             row, why = self.watches[name].add_cross_pair(sig)
@@ -867,10 +867,9 @@ class Engine:
                         if config.ALERTS_PAUSED:
                             self.log(f"Alerts paused: {len(alerts)} BEP support alert(s) not shown.")
                         for e in alerts:
-                            label = notifier.support_label(e)
-                            self.log(label)
-                            if not config.ALERTS_PAUSED:
-                                self.notify(label, "positive", f"{e.get('index', name)} BEP Support {e['opt']}")
+                            self.log(notifier.support_label(e))
+                        if not config.ALERTS_PAUSED:               # one short toast per scan; full text in the Log
+                            self.notify("\n".join(notifier.support_short(alerts)), "positive", f"{name} BEP Support")
                     star_added = self._add_star_rows(name, alerts)
                     star_failed = self.watches[name].sync_star_failures(mon.support)
                     if res.get("cross_changed"):
@@ -882,12 +881,13 @@ class Engine:
                     before = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
                     fired = await run.io_bound(self.watches[name].step, self.client, mon.expiry, now)
                     for r in fired:
-                        label = notifier.common_label(r)
-                        self.log("COMMON PRICE: " + label)
+                        self.log("COMMON PRICE: " + notifier.common_label(r))
+                    if fired:
                         if config.ALERTS_PAUSED or not market_utils.is_market_open(now):
                             self.log("Common price alert not shown (alerts paused or market closed).")
-                        else:
-                            self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
+                        else:                              # one short toast per scan; full text in the Log
+                            self.notify("\n".join(notifier.common_short(r) for r in fired), "positive",
+                                        f"{name} Order Management")
                     after = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
                     if star_added or star_failed or cross_added or cross_failed or fired or before != after:
                         self.bump("watch")
