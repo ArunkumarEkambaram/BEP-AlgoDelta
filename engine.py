@@ -519,12 +519,22 @@ class Engine:
             self.log(f"{name} {strike}{opt} quote error: {ex}")
         return self.option_ltp.get((name, int(strike), opt))
 
-    def add_manual(self, name, strike, opt, lots, entry_price=None, mode=None):
-        r = self.watches[name].add_manual(strike, opt, lots, entry_price, _now(), mode)
+    def add_manual(self, name, strike, opt, lots, entry_price=None, mode=None, trigger=None):
+        r = self.watches[name].add_manual(strike, opt, lots, entry_price, _now(), mode, trigger)
         self.log(f"{name} Manual Entry added: {strike}{opt}, {lots} lot(s), "
-                 + (f"LIMIT at {entry_price:.2f}" if mode == "limit" else
+                 + (f"STOP-LIMIT trigger {trigger:.2f} limit {entry_price:.2f}" if mode == "limit" and trigger else
+                    f"LIMIT at {entry_price:.2f}" if mode == "limit" else
                     f"entry at {entry_price:.2f}" if entry_price else "market") + ".")
         self.bump("watch")
+        return r
+
+    def set_stoplimit(self, name, row_id, trigger, price):
+        r = self.watches[name].set_stoplimit(row_id, trigger, price)
+        if r:
+            self.log(f"{name} Manual {r['strike']}{r['opt']}: " + (
+                f"switched to STOP-LIMIT trigger {trigger:.2f} limit {price:.2f}." if trigger else
+                f"switched to LIMIT {price:.2f}."))
+            self.bump("watch")
         return r
 
     def set_watch_entry(self, name, row_id, price, direction=None) -> bool:
@@ -617,10 +627,9 @@ class Engine:
             fired, changed = self.watches[name].live_step(
                 lambda strike, opt, name=name: self.option_ltp.get((name, int(strike), opt)), now)
             for r in fired:
-                label = notifier.common_label(r)
-                self.log("COMMON PRICE (live LTP): " + label)
-                if not config.ALERTS_PAUSED:
-                    self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
+                self.log("COMMON PRICE (live LTP): " + notifier.common_label(r))
+            if fired and not config.ALERTS_PAUSED:
+                self.notify("\n".join(notifier.common_short(r) for r in fired), "positive", f"{name} Order Management")
             if changed:
                 self.bump("watch")
 
@@ -786,13 +795,14 @@ class Engine:
     def _cross_signals(self, name, signals) -> bool:
         """Live BEP Pair cross signals: alert (unless paused) and add a TRIGGERED Pair row to Order Management."""
         added = False
-        for sig in signals or []:
-            label = notifier.cross_label(sig)
-            self.log(label)
+        signals = signals or []
+        if signals:
             if config.ALERTS_PAUSED:
-                self.log("Alerts paused: BEP Pair cross alert not shown.")
-            else:
-                self.notify(label, "positive", f"{name} BEP Pair cross {sig['up']['strike']}{sig['up']['opt']}")
+                self.log(f"Alerts paused: {len(signals)} BEP Pair cross alert(s) not shown.")
+            else:                                          # one short toast per scan; full text in the Log
+                self.notify("\n".join(notifier.cross_short(s) for s in signals), "positive", f"{name} BEP Pair cross")
+        for sig in signals:
+            self.log(notifier.cross_label(sig))
             if not getattr(config, "BEP_CROSS_ADD_PAIR", True):
                 continue
             row, why = self.watches[name].add_cross_pair(sig)
@@ -867,10 +877,9 @@ class Engine:
                         if config.ALERTS_PAUSED:
                             self.log(f"Alerts paused: {len(alerts)} BEP support alert(s) not shown.")
                         for e in alerts:
-                            label = notifier.support_label(e)
-                            self.log(label)
-                            if not config.ALERTS_PAUSED:
-                                self.notify(label, "positive", f"{e.get('index', name)} BEP Support {e['opt']}")
+                            self.log(notifier.support_label(e))
+                        if not config.ALERTS_PAUSED:               # one short toast per scan; full text in the Log
+                            self.notify("\n".join(notifier.support_short(alerts)), "positive", f"{name} BEP Support")
                     star_added = self._add_star_rows(name, alerts)
                     star_failed = self.watches[name].sync_star_failures(mon.support)
                     if res.get("cross_changed"):
@@ -882,12 +891,13 @@ class Engine:
                     before = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
                     fired = await run.io_bound(self.watches[name].step, self.client, mon.expiry, now)
                     for r in fired:
-                        label = notifier.common_label(r)
-                        self.log("COMMON PRICE: " + label)
+                        self.log("COMMON PRICE: " + notifier.common_label(r))
+                    if fired:
                         if config.ALERTS_PAUSED or not market_utils.is_market_open(now):
                             self.log("Common price alert not shown (alerts paused or market closed).")
-                        else:
-                            self.notify(label, "positive", f"{r['index']} Common Price {r['strike']}{r['opt']}")
+                        else:                              # one short toast per scan; full text in the Log
+                            self.notify("\n".join(notifier.common_short(r) for r in fired), "positive",
+                                        f"{name} Order Management")
                     after = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
                     if star_added or star_failed or cross_added or cross_failed or fired or before != after:
                         self.bump("watch")
@@ -1157,6 +1167,7 @@ class Engine:
         ltp = self.row_live_ltp(name, r)
         if ltp is None:
             ltp = await self.quote_option(name, r["strike"], r["opt"])
+        trigger = r.get("entry_trigger") if r.get("source") == "manual" else None   # stop-limit (sl_order)
         sl, tgt, trail, app_rules = self._limit_rules(name, r)
         lots = self.row_qty(name, r)
         t = _stamp()
@@ -1165,9 +1176,11 @@ class Engine:
                  "common": "Manual — common price", "manual": "Manual entry"}[kind]
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"], "price": price, "bep": price,
                "ltp": float(ltp if ltp is not None else price),
-               "entry_note": f"LIMIT {price:.2f}" + (f", LTP {ltp:.2f} at the click" if ltp is not None else ""),
-               "expiry": mon.expiry, "order_type": "limit_order", "kind": kind,
-               "kind_label": label + " — limit", "time": t, "params": {"qty": lots}, "app_rules": app_rules}
+               "entry_note": (f"STOP-LIMIT trigger {trigger:.2f} limit {price:.2f}" if trigger else f"LIMIT {price:.2f}")
+               + (f", LTP {ltp:.2f} at the click" if ltp is not None else ""),
+               "expiry": mon.expiry, "order_type": "sl_order" if trigger else "limit_order", "kind": kind,
+               "kind_label": label + (" — stop-limit" if trigger else " — limit"), "time": t, "params": {"qty": lots},
+               "app_rules": app_rules, "trigger": trigger}
         r["pending"] = None
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
@@ -1176,11 +1189,16 @@ class Engine:
             m = {"price": price, "units": lots * config.INDEXES[name]["lot_size"], "state": "OPEN",
                  "msg": "Sent, waiting for the fill", "sent_at": t, "oid": None, "filled": 0, "fill": None,
                  "fill_time": "", "sl": sl, "tgt": tgt, "trail": trail, "high": None, "cancel_ts": None, "exit": ""}
+            if trigger:
+                m.update(trigger=trigger, triggered=False,
+                         msg=f"Sent, waiting at the exchange for the trigger {trigger:.2f}")
             if res["status"] == "dry_run":
                 if not market_utils.is_market_open():     # a stale pre-open LTP must not fill it
                     m["msg"] = "Dry run: market not open yet - waits for 09:15, then fills at or below the price"
                 elif limit_orders.dry_fill(m, ltp, t):    # marketable limit: fills at once, near the LTP
                     m["msg"] = f"Filled at once at {m['fill']:.2f} (dry run; the LTP was already below the limit)"
+                elif trigger and not m.get("triggered"):
+                    m["msg"] = f"Dry run: waits for the LTP to rise to {trigger:.2f}, then a limit at {price:.2f}"
                 else:
                     m["msg"] = "Dry run: fills when the LTP is at or below the price"
             sig["mg"] = limit_orders.dump(m)
@@ -1193,7 +1211,8 @@ class Engine:
         st = ORDER_STATUS.get(res["status"], res["status"].upper())
         if not market_utils.is_market_open():
             st += " (market not open yet: the limit waits for 09:15)"
-        self.notify(f"{name} {r['strike']}{r['opt']}: LIMIT {price:.2f} {st}"
+        self.notify(f"{name} {r['strike']}{r['opt']}: "
+                    + (f"STOP-LIMIT {trigger:.2f} → {price:.2f} " if trigger else f"LIMIT {price:.2f} ") + st
                     + (" - SL / Target are watched by the app (keep this PC on)." if res["status"] in ("sent", "dry_run")
                        else f" - {res['detail']}"),
                     {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
@@ -1313,10 +1332,15 @@ class Engine:
             # 3. dry run fills
             for o in mine(lambda o, m: m and o.get("status") == "DRY RUN" and m.get("state") == "OPEN"):
                 m = limit_orders.parse(o["mg"])
-                if limit_orders.dry_fill(m, self.option_ltp.get(self._opt_key(o)), t):
+                before = limit_orders.dump(m)
+                filled = limit_orders.dry_fill(m, self.option_ltp.get(self._opt_key(o)), t)
+                if limit_orders.dump(m) != before:                # filled, or a stop-limit triggered
                     self._limit_save(o, m)
                     dirty = True
+                if filled:
                     self._limit_event(o, m, ["filled"])
+                elif m.get("triggered") and '"triggered": false' in before:
+                    self.log(f"{o['index']} {o['strike']}{o['opt']}: {m['msg']}")
 
             # 4. 15:15: cancel what is still open at the exchange (once)
             if eod:

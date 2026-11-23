@@ -127,7 +127,8 @@ class CommonWatch:
         self.save()
         return row
 
-    def add_manual(self, strike: int, opt: str, lots: int, entry_price=None, now=None, mode: str = None) -> dict:
+    def add_manual(self, strike: int, opt: str, lots: int, entry_price=None, now=None, mode: str = None,
+                   trigger=None) -> dict:
         """Manual Entry card (source "manual"): no trigger condition, ready to order at once. Entry price None =
         market at the click; a price = the app waits for the LTP (same as any card's entry price).
         mode "limit" = an AlgoDelta limit_order at the price, SL / Target watched by the app (limit_orders.py)."""
@@ -140,10 +141,21 @@ class CommonWatch:
                "last_close": None, "last_time": "", "trig_time": now.strftime("%H:%M"), "trig_close": None,
                "fail_time": "", "fail_close": None, "order_status": "", "qty": int(lots),
                "entry_price": round(float(entry_price), 2) if entry_price else None, "entry_dir": None,
-               "entry_mode": "limit" if mode == "limit" else None}
+               "entry_mode": "limit" if mode == "limit" else None,
+               "entry_trigger": round(float(trigger), 2) if trigger and mode == "limit" else None}  # stop-limit
         self.rows.append(row)
         self.save()
         return row
+
+    def set_stoplimit(self, row_id, trigger, price) -> dict:
+        """Turns a Manual limit card that is not ordered yet into a stop-limit (trigger) or back (trigger None)."""
+        r = self.get(row_id)
+        if not r or r.get("source") != "manual" or r.get("order_status"):
+            return None
+        r.update(entry_mode="limit", entry_trigger=round(float(trigger), 2) if trigger else None,
+                 entry_price=round(float(price), 2), price=float(price))
+        self.save()
+        return r
 
     def sync_star_failures(self, support: dict) -> bool:
         """Marks \u2b50 rows FAILED when their BEP Support board row (same strike, leg and time) has turned red."""
@@ -490,6 +502,8 @@ class CommonWatch:
 
     @staticmethod
     def pair_title(r) -> str:
+        if r.get("auto") == "cross":                       # BEP Pair cross row: the prices are the legs' BEPs
+            return f"{r['ce_strike']}CE / {r['pe_strike']}PE · BEP {r['ce_price']:.2f} / {r['pe_price']:.2f}"
         pe = "" if r["pe_price"] == r["ce_price"] else f" (PE @ {r['pe_price']:g})"
         return f"{r['ce_strike']}CE / {r['pe_strike']}PE @ {r['ce_price']:g}{pe}"
 
@@ -522,7 +536,8 @@ class CommonWatch:
             return text
 
         if r.get("source") == "manual":
-            return ("Manual LIMIT entry" if r.get("entry_mode") == "limit" else "Manual entry") \
+            return ("Manual STOP-LIMIT entry" if r.get("entry_trigger") else
+                    "Manual LIMIT entry" if r.get("entry_mode") == "limit" else "Manual entry") \
                 + f" added {r['trig_time']}"
         if r.get("source") == "star":
             text = f"\u2b50 support at {r['trig_time']}, close {r['trig_close']:.2f}"

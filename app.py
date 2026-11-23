@@ -110,6 +110,10 @@ CSS = """
   .q-card { border-radius: 12px; }
   .nav-item { border-radius: 8px; margin: 2px 8px; }
   .nav-active { background: rgba(59,130,246,.18); color: #60a5fa; font-weight: 600; }
+  /* alerts (PR #36): small toasts top-right, below the header */
+  .q-notifications__list--top.items-end { top: 60px; }
+  .bep-toast { max-width: 360px; min-width: 0; font-size: 13px; white-space: pre-line; padding: 4px 10px; }
+  .bep-toast .q-notification__actions .q-btn { color: #fff !important; min-height: 0; padding: 0 4px; }
   .nav-sub { margin-left: 24px; min-height: 36px; white-space: nowrap; }
   .nav-group-active { color: #60a5fa; font-weight: 600; }
   .stat-label { font-size: 12px; opacity: .65; text-transform: uppercase; letter-spacing: .04em; }
@@ -255,7 +259,8 @@ def root():
             if seq <= seen["seq"]:
                 continue
             seen["seq"] = seq
-            ui.notify(e["msg"], type=e["type"], position="top", timeout=12000, multi_line=True)
+            ui.notify(e["msg"], type=e["type"], position="top-right", timeout=8000,
+                      close_button="✕", classes="bep-toast")
             if e.get("title"):
                 ui.run_javascript(f'if (Notification.permission === "granted") '
                                   f'{{ new Notification({json.dumps(e["title"])}, {{ body: {json.dumps(e["msg"])} }}); }}')
@@ -705,11 +710,15 @@ LEVEL_NAME = {"star": "BEP", "pair": "Pair price", "manual": "Order type"}
 
 def level_name(r) -> str:
     """Heading of a card's level box: Common price (Same strike) / Pair price / BEP (\u2b50) / Order type (Manual)."""
+    if r.get("auto") == "cross":                       # BEP Pair cross row: the Pair prices are the legs' BEPs
+        return "BEP"
     return LEVEL_NAME.get(r.get("source"), "Common price")
 
 
 def manual_type(r) -> str:
     """Manual Entry card's order type: Limit / Price (app waits for the price, then market) / Market."""
+    if r.get("entry_trigger"):
+        return "Stop-limit"
     return "Limit" if r.get("entry_mode") == "limit" else ("Price" if r.get("entry_price") else "Market")
 
 
@@ -870,6 +879,16 @@ def card_ltp_text(name, r) -> str:
     if v is None and r.get("last_close") is not None:
         return f"{r['last_close']:.2f}*"            # * = last candle close until a live LTP arrives
     return f"{v:.2f}" if v is not None else "--"
+
+
+def cross_bep_gaps(name, r):
+    """BEP cross Pair card: live LTP minus BEP for the CE and the PE leg (None until an LTP arrives)."""
+    lt = engine.option_ltp
+    out = []
+    for opt, strike, bep_ in (("CE", r["ce_strike"], r["ce_price"]), ("PE", r["pe_strike"], r["pe_price"])):
+        v = lt.get((name, int(strike), opt))
+        out.append((opt, None if v is None else round(v - bep_, 2)))
+    return out
 
 
 def card_box(title, icon=None):
@@ -1290,6 +1309,32 @@ def entry_price_box(name, r, pending):
         tg = ui.toggle({"strategy": "Strategy", "limit": "Limit"},
                        value="limit" if r.get("entry_mode") == "limit" else "strategy").props("dense no-caps size=sm")
         tg.on_value_change(lambda e: engine.set_watch_mode(name, r["id"], "limit" if e.value == "limit" else None))
+    if r.get("entry_trigger"):                        # Manual stop-limit (AlgoDelta sl_order): trigger + limit
+        with ui.row().classes("items-center gap-1 no-wrap"):
+            trg = ui.number(value=r["entry_trigger"], min=0.05, step=0.05) \
+                .props("dense borderless input-class=text-center").classes("w-16 text-base font-bold") \
+                .tooltip("Trigger: the order waits at the exchange until the LTP rises to this")
+            ui.label("\u2192").classes("opacity-60")
+            lim = ui.number(value=price, min=0.05, step=0.05) \
+                .props("dense borderless input-class=text-center").classes("w-16 text-base font-bold") \
+                .tooltip("Limit: the most you pay once triggered")
+
+        def save_stop(_e=None):
+            try:
+                t, p = float(trg.value), float(lim.value)
+            except (TypeError, ValueError):
+                t = p = 0
+            if t <= 0 or p < t:
+                ui.notify("Stop-limit: trigger above 0 and limit at or above the trigger.", type="warning")
+                trg.set_value(r["entry_trigger"])
+                lim.set_value(r.get("entry_price"))
+                return
+            engine.set_stoplimit(name, r["id"], t, p)
+        for w in (trg, lim):
+            w.on("blur", save_stop)
+            w.on("keydown.enter", save_stop)
+        ui.label("STOP-LIMIT at \u26a1: trigger \u2192 limit").classes("text-xs text-amber-5")
+        return
     if r.get("entry_mode") == "limit":                # limit order: a price, no direction
         manual = r.get("source") == "manual"
         inp = ui.number(value=price, min=0.05, step=0.05, placeholder="" if manual else "level") \
@@ -1373,7 +1418,9 @@ def order_card(name, r, place, live):
                     can_place = r["status"] == "triggered" and not done
                     b = ui.button(icon="bolt", on_click=lambda _e, i=r["id"]: place(i)) \
                         .props("dense unelevated color=" + ("green" if can_place else "grey-8"))
-                    b.tooltip(f"Send a LIMIT order at {engine.limit_price(r):.2f}" if r.get("entry_mode") == "limit"
+                    b.tooltip(f"Send a STOP-LIMIT order: trigger {r['entry_trigger']:.2f}, limit {engine.limit_price(r):.2f}"
+                              if r.get("entry_trigger") and engine.limit_price(r) else
+                              f"Send a LIMIT order at {engine.limit_price(r):.2f}" if r.get("entry_mode") == "limit"
                               and engine.limit_price(r) else "Send a LIMIT order" if r.get("entry_mode") == "limit" else
                               f"Arm: send when LTP reaches {r['entry_price']:.2f}" if r.get("entry_price")
                               else "Place order now (market)")
@@ -1408,14 +1455,26 @@ def order_card(name, r, place, live):
                 pnl_lbl = ui.label("--").classes("text-lg font-bold")
                 pts_lbl = ui.label("").classes("text-xs opacity-70")
             with card_box("LTP"):
-                ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-nowrap")
+                ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-pre-line text-center leading-tight")
+            gap_row = None
             if r.get("source") == "manual":
                 with card_box(level_name(r)):
                     mt = manual_type(r)
                     ui.label(mt).classes("text-lg font-bold")
-                    ui.label({"Limit": "SL / Target by the app", "Price": "waits for the price, then market",
+                    ui.label({"Limit": "SL / Target by the app",
+                              "Stop-limit": f"at LTP \u2265 {r.get('entry_trigger') or 0:.2f}, limit "
+                                            f"{r.get('entry_price') or 0:.2f} \u00b7 SL / Target by the app",
+                              "Price": "waits for the price, then market",
                               "Market": "market order at \u26a1"}[mt]).classes(
-                        "text-xs " + ("text-amber-5" if mt == "Limit" else "opacity-60"))
+                        "text-xs " + ("text-amber-5" if mt in ("Limit", "Stop-limit") else "opacity-60"))
+            elif r.get("auto") == "cross":                 # BEP Pair cross row: each leg's BEP and live LTP - BEP
+                with card_box("BEP"):
+                    gap_row = []
+                    for o in ("CE", "PE"):
+                        with ui.row().classes("items-center gap-2 no-wrap"):
+                            ui.label(f"{o} {r[o.lower() + '_price']:.2f}").classes("text-base font-bold whitespace-nowrap")
+                            gap_row.append(ui.label("").classes("text-xs font-bold whitespace-nowrap"))
+                    ui.label(f"{r['opt']} closed above · {r['tf']} min · buffer {r['buffer']:g}").classes("text-xs opacity-60")
             else:
                 with card_box(level_name(r)):
                     with ui.row().classes("items-center gap-1 no-wrap"):
@@ -1449,14 +1508,20 @@ def order_card(name, r, place, live):
 
     def refresh():
         o = engine.row_order(r)
-        ltp_lbl.set_text(card_ltp_text(name, r))
+        ltp_lbl.set_text(card_ltp_text(name, r).replace(" · ", "\n"))   # pair: CE and PE on two lines
+        if gap_row is not None:
+            for lbl, (opt, gap) in zip(gap_row, cross_bep_gaps(name, r)):
+                lbl.set_text("--" if gap is None else f"{gap:+.2f} {'above' if gap >= 0 else 'below'}")
+                lbl.classes(remove="text-green-5 text-red-5 opacity-60")
+                lbl.classes(add="opacity-60" if gap is None else ("text-green-5" if gap >= 0 else "text-red-5"))
         mo = limit_orders.parse(o.get("mg")) if o else None
         if entry_lbl is not None:
             entry = o.get("entry") if o else None
             if trade_tracker._f(entry) is None and limit_orders.held(mo):
                 entry = mo["fill"]                      # live: order-book fill until the trade book has it
             entry_lbl.set_text(_num_text(entry) if o else "--")
-        msg_lbl.set_text(f"Limit {mo['price']:.2f}: {mo.get('msg', '')}" if mo else "")
+        msg_lbl.set_text((f"Stop-limit {mo['trigger']:.2f} \u2192 {mo['price']:.2f}: " if mo and mo.get("trigger") else
+                          f"Limit {mo['price']:.2f}: " if mo else "") + (mo.get("msg", "") if mo else ""))
         pnl = trade_tracker._f(o.get("pnl")) if o else None
         pts = trade_tracker._f(o.get("points")) if o else None
         live = engine.open_pnl(o) if pnl is None else None   # open position: (LTP - Entry) x qty, every 2 s
@@ -1585,10 +1650,48 @@ def make_place(name):
             if not lp:
                 ui.notify("Set the limit price first.", type="warning")
                 return
-            if not limit_sanity_ok(lp, ltp, guarded):
+            trigger = r.get("entry_trigger")
+            if trigger:                                  # stop-limit: the trigger must still be above the LTP
+                if ltp is not None and ltp >= trigger:
+                    ui.notify(f"Stop-limit: LTP {ltp:.2f} is already at or above the trigger {trigger:.2f}. "
+                              "Raise the trigger, or use Limit / Market.", type="warning", multi_line=True)
+                    return
+            elif ltp is not None and lp > ltp:           # BUY limit above the LTP: fills at once (PR #36)
+                limit_above_ltp(name, r, lp, ltp, guarded)
+                return
+            if not trigger and not limit_sanity_ok(lp, ltp, guarded):
                 return
         await guarded()
     return place
+
+
+def limit_above_ltp(name, r, price, ltp, then):
+    """A BUY limit above the LTP fills at once near the LTP. Asks first; a Manual card can switch to Stop-limit
+    (AlgoDelta sl_order: waits at the exchange until the LTP rises to the price)."""
+    with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
+        ui.label("This limit fills immediately").classes("text-lg font-bold")
+        ui.label(f"Limit {price:.2f} is above the LTP {ltp:.2f}: a BUY limit means \"at {price:.2f} or cheaper\", "
+                 f"so it fills at once at about {ltp:.2f}.").classes("text-sm")
+        manual = r.get("source") == "manual"
+        ui.label(f"To buy when the price RISES to {price:.2f}, use Stop-limit" + (
+            f" (trigger {price:.2f} \u2192 limit {price + config.STOP_LIMIT_GAP:.2f})." if manual else
+            " (Manual Entry).")).classes("text-sm text-orange-4")
+
+        async def go():
+            dlg.close()
+            await then()
+
+        def switch():
+            dlg.close()
+            if engine.set_stoplimit(name, r["id"], price, round(price + config.STOP_LIMIT_GAP, 2)):
+                ui.notify(f"Switched to Stop-limit: trigger {price:.2f} \u2192 limit "
+                          f"{price + config.STOP_LIMIT_GAP:.2f}. Check it on the card, then \u26a1.", type="positive")
+        with ui.row().classes("w-full justify-end gap-2"):
+            ui.button("Cancel", on_click=dlg.close).props("flat")
+            if manual:
+                ui.button("Switch to Stop-limit", on_click=switch).props("color=primary")
+            ui.button("Send limit anyway", on_click=go).props("color=orange-9")
+    dlg.open()
 
 
 def limit_sanity_ok(price, ltp, then) -> bool:
@@ -1805,11 +1908,14 @@ def star_page():
 
 def manual_page():
     om_header("Manual Entry", "Pick a strike and place a BUY yourself - no trigger condition. Market = order at "
-              "⚡ / Add & place. Price = the app waits until the LTP reaches your price (↓ at or below, "
-              "↑ at or above), then sends a market order; Target / Stoploss / Trailing go with the AlgoDelta "
-              "strategy order. Limit = an AlgoDelta limit order at your price; its Target / Stoploss / Trailing are "
-              "watched by THIS APP on the live LTP (square-off when hit), so keep the PC on. Deleting a card with "
-              "an open limit order cancels it (cancel_order); open limits are cancelled at 15:15.")
+              "⚡ / Add & place. Price = the app waits until the LTP reaches your price (either way: ↓ a dip or "
+              "↑ a breakout), then sends a market order; Target / Stoploss / Trailing go with the AlgoDelta "
+              "strategy order. Limit = buy at this price OR CHEAPER (AlgoDelta limit order): it waits only if the "
+              "price is below the LTP; above the LTP it fills at once. Stop-limit = buy when the price RISES to the "
+              "trigger (AlgoDelta sl_order, waits at the exchange), then a limit at the limit price. For Limit and "
+              "Stop-limit the Target / Stoploss / Trailing are watched by THIS APP on the live LTP (square-off when "
+              "hit), so keep the PC on. Deleting a card with an open order cancels it (cancel_order); open orders "
+              "are cancelled at 15:15.")
     for name in engine.active():
         step = config.INDEXES[name]["strike_interval"]
         with ui.card().classes("w-full"):
@@ -1822,12 +1928,19 @@ def manual_page():
                 lots = ui.number("Lots", value=config.AUTO_ORDER[name]["qty"], min=1, step=1, precision=0).classes("w-24")
                 with ui.column().classes("gap-0"):
                     ui.label("Order").classes("text-xs opacity-70")
-                    mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit"}, value="limit") \
-                        .props("dense no-caps")
+                    mode = ui.toggle({"price": "Price", "market": "Market", "limit": "Limit",
+                                      "stoplimit": "Stop-limit"}, value="limit").props("dense no-caps")
+                trigger = ui.number("Trigger (LTP rises to)", value=None, min=0, step=0.05).classes("w-40")
+                trigger.bind_visibility_from(mode, "value", lambda v: v == "stoplimit")
                 price = ui.number("Limit price", value=None, min=0, step=0.05).classes("w-32")
-                price.bind_visibility_from(mode, "value", lambda v: v in ("price", "limit"))
+                price.bind_visibility_from(mode, "value", lambda v: v in ("price", "limit", "stoplimit"))
                 mode.on_value_change(lambda e, price=price: price.props(
-                    f'label="{"Limit price" if e.value == "limit" else "Entry price"}"'))
+                    f'label="{"Limit price" if e.value in ("limit", "stoplimit") else "Entry price"}"'))
+
+                def trigger_set(_e=None, trigger=trigger, price=price):     # limit = trigger + gap, editable
+                    if trigger.value:
+                        price.set_value(round(float(trigger.value) + config.STOP_LIMIT_GAP, 2))
+                trigger.on("blur", trigger_set)
                 with ui.column().classes("gap-0 items-start"):
                     ui.label("LTP").classes("text-xs opacity-70")
                     ltp_lbl = ui.label("--").classes("text-lg font-bold")
@@ -1845,7 +1958,8 @@ def manual_page():
             strike.on("blur", get_ltp)
             opt.on_value_change(get_ltp)
 
-            def validated(name=name, step=step, strike=strike, opt=opt, lots=lots, mode=mode, price=price):
+            def validated(name=name, step=step, strike=strike, opt=opt, lots=lots, mode=mode, price=price,
+                          trigger=trigger):
                 try:
                     k, q = int(strike.value), int(lots.value)
                 except (TypeError, ValueError):
@@ -1854,8 +1968,14 @@ def manual_page():
                 if k <= 0 or k % step or q < 1:
                     ui.notify(f"Strike must be a multiple of {step}; lots 1 or more.", type="negative")
                     return None
-                p = None
-                if mode.value in ("price", "limit"):
+                p = t = None
+                if mode.value == "stoplimit":
+                    try:
+                        t = float(trigger.value)
+                    except (TypeError, ValueError):
+                        ui.notify("Enter the trigger price.", type="negative")
+                        return None
+                if mode.value in ("price", "limit", "stoplimit"):
                     try:
                         p = float(price.value)
                     except (TypeError, ValueError):
@@ -1864,7 +1984,10 @@ def manual_page():
                     if p <= 0:
                         ui.notify("Entry price must be above 0.", type="negative")
                         return None
-                return k, opt.value, q, p, ("limit" if mode.value == "limit" else None)
+                if t is not None and (t <= 0 or p < t):
+                    ui.notify("Stop-limit: the limit price must be at or above the trigger.", type="negative")
+                    return None
+                return k, opt.value, q, p, ("limit" if mode.value in ("limit", "stoplimit") else None), t
 
             def add(name=name, validated=validated):
                 v = validated()

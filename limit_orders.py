@@ -13,6 +13,8 @@ The state lives on the Order Details row, as JSON in its "mg" column (so it surv
   trail      {"trigger", "gap", "step"} or None (moves the SL, never down)
   high       highest LTP since the fill        cancel_ts  epoch seconds the cancel_order was sent
   exit       text once the app sent its exit (so it is sent only once)
+  trigger    stop-limit only (AlgoDelta sl_order, PR #36): the BUY waits at the exchange until the LTP rises to
+             the trigger, then it is a limit order at price      triggered  True once that happened
 
 OPEN may already be partly filled: the filled part is protected while the rest waits.
 Pure functions only (no Upstox / AlgoDelta calls) so they are easy to test.
@@ -104,7 +106,13 @@ def dry_fill(m, ltp, stamp) -> bool:
     """Dry run (market hours only - the engine checks): a BUY limit fills once the live LTP is at or below the
     price, at the LOWER of the two (a gap below the price fills near the LTP, like the exchange would).
     Returns True when filled."""
-    if m.get("state") != "OPEN" or held(m) or ltp is None or ltp > m["price"]:
+    if m.get("state") != "OPEN" or held(m) or ltp is None:
+        return False
+    if m.get("trigger") and not m.get("triggered"):           # stop-limit: first the LTP must rise to the trigger
+        if ltp < m["trigger"]:
+            return False
+        m.update(triggered=True, msg=f"Triggered at LTP {ltp:.2f} (dry run): now a limit at {m['price']:.2f}")
+    if ltp > m["price"]:
         return False
     fill = round(min(m["price"], ltp), 2)
     m.update(filled=m["units"], fill=fill, fill_time=stamp, high=fill, state="FILLED",
@@ -137,7 +145,10 @@ def match_order(book, m, ik, taken=()):
             continue
         if (o.get("instrument_token") or o.get("instrument_key")) not in (ik, (ik or "").replace("|", ":")):
             continue
-        if (o.get("transaction_type") or "").upper() != "BUY" or (o.get("order_type") or "").upper() != "LIMIT":
+        want = "SL" if m.get("trigger") else "LIMIT"            # Upstox order_type of a stop-limit is "SL"
+        if (o.get("transaction_type") or "").upper() != "BUY" or (o.get("order_type") or "").upper() != want:
+            continue
+        if m.get("trigger") and abs((_f(o.get("trigger_price")) or 0) - m["trigger"]) > 0.051:
             continue
         price = _f(o.get("price"))
         if price is None or abs(price - m["price"]) > 0.051:
@@ -181,7 +192,14 @@ def apply_book(m, o, stamp) -> list:
         m["msg"] = "Rejected: " + str(o.get("status_message") or o.get("status_message_raw") or "no reason given")
     elif m.get("state") not in ("CANCEL SENT", "CANCEL FAILED"):
         m["state"] = "OPEN"
-        m["msg"] = f"Open at the exchange ({o.get('status')})" + (f", {int(filled)} filled" if filled else "")
+        if m.get("trigger") and "trigger" in st:              # stop-limit still waiting for its trigger
+            m["msg"] = f"Waiting at the exchange for the trigger {m['trigger']:.2f} ({o.get('status')})"
+        else:
+            if m.get("trigger"):
+                m["triggered"] = True
+            m["msg"] = f"Open at the exchange ({o.get('status')})" + (f", {int(filled)} filled" if filled else "")
+    if m.get("trigger") and filled:
+        m["triggered"] = True
     return events
 
 
@@ -214,5 +232,7 @@ def state_text(m) -> str:
     s = m.get("state")
     if held(m):
         return None
+    if s == "OPEN" and m.get("trigger") and not m.get("triggered"):
+        return f"STOP @ {m['trigger']:.2f} → LIMIT {m['price']:.2f}"
     return {"OPEN": f"LIMIT OPEN @ {m['price']:.2f}", "CANCEL SENT": "CANCELLING",
             "CANCEL FAILED": "CANCEL FAILED", "CANCELLED": "CANCELLED", "REJECTED": "REJECTED"}.get(s, s or "")

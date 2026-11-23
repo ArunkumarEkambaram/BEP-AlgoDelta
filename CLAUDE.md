@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #34; PR #35 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #35; PR #36 open; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 
@@ -206,7 +206,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **Pairs:** ATM = the strike nearest NIFTY's close of that candle.
      - **Buy CE:** the leg above (the one to buy) is the CE at ATM or up to **2 strikes ITM** (ATM − 50, ATM − 100; `BEP_CROSS_ITM_STRIKES` = 2, PR #35; it was 1); the opponent below is the PE at ATM − 50, ATM or ATM + 50.
      - **Buy PE:** the leg above is the PE at ATM or up to 2 strikes ITM (ATM + 50, ATM + 100); the opponent is the CE at ATM ± 50.
-     - **Why 2 (PR #35):** on 20 Nov at 09:40, 25400CE closed above its BEP and 25450PE below, but NIFTY was about 25,485 (ATM 25500), so 25400 was 2 strikes ITM and was never checked.
+     - **Why 2 (PR #35):** on 20 Nov at 09:40, 25400CE closed above its BEP and 25450PE below, but NIFTY was about 25,485 (ATM 25500), so 25400 was 2 strikes ITM and was never checked. The user confirmed on the 20 Nov replay (after PR #35) that the 09:40 row now shows.
    - **Signal:** the up-leg closes > its BEP **and** the down-leg closes < its BEP, and the previous candle wasn't in that state. Either leg may have crossed first (e.g. PE below at 09:40, CE above at 09:45). A pair already split on the first candle counts. No margin past BEP.
    - **Touch (user request):** both legs must have **touched** their BEP (low ≤ BEP + `BEP_CROSS_TOUCH_TOL` = 1 and high ≥ BEP − 1) on the signal candle or the 2 before (`BEP_CROSS_TOUCH_CANDLES` = 3). A leg far away from its BEP doesn't count.
    - **Labels (PR #35, the user is an option buyer and never shorts):** the Signal column shows a **Buy CE** (green) / **Buy PE** (red) badge (no ↑/↓ arrows); the columns are "Buy leg (closed above BEP)" and "Opponent (closed below BEP)"; Pts since / Best are for the **buy leg only**; alerts read "BUY 25400CE … | opponent 25450PE …".
@@ -224,9 +224,34 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - Only days since the last expiry (older contracts aren't listed). The CSV must be **that day's** file; calculated = (CE + PE) / 2 of the previous day's closes (`fetch_close_before`, 2 calls per strike, ATM windows only).
      - Not available on non-trading days for "today": the board only reads today's intraday candles, so on a weekend the live board is empty (the user asked on Sat 21 Nov).
 
+26. **Short toasts, top-right (PR #36):** the user said the long toasts covered the screen at the moment of the signal.
+   - Toasts are top-right below the header, max 360 px wide, shown for 8 s, with a ✕ (`app.py` `pump_events`, CSS `.bep-toast`).
+   - The text is short: `⭐ Support 26200PE · touch and go`, `Pair cross: BUY 25950PE · opp 25900CE`, `Pair 25450CE/25450PE: CE triggered → Place order` (`notifier.support_short` / `cross_short` / `common_short`). BEP, close and time are in the tables.
+   - Alerts of one type in one scan are merged into **one** toast (e.g. `⭐ Support PE: 26200, 26100, 26050 · touch and go`).
+   - The browser notification shows the same short text; the **full** labels still go to the Log.
+   - Other toasts (order results, form messages) keep their text but use the same position and size.
+27. **BEP box on BEP cross Pair cards (PR #36):** the user wants the BEP next to the live LTP, to compare.
+   - Rows added by a BEP cross (`auto` = "cross") name the level box **BEP** (not "Pair price"): `CE 137.32` / `PE 126.15` on two lines, each with its live **LTP − BEP** (`+9.03 above` green / `-23.35 below` red, the 2 s LTP batch, `cross_bep_gaps`).
+   - The header chip / Compact Pair column read `25600CE / 25650PE · BEP 137.32 / 126.15` (`CommonWatch.pair_title`).
+   - Pair cards (all) show the LTP as `CE x` / `PE y` on two lines (the one-line text overlapped the next box).
+   - Manual Pair rows keep "Pair price" (the user's own levels).
+28. **Stop-limit entry and the limit-above-LTP warning (PR #36):**
+   - **Why:** the user set a Manual BUY **Limit 140** with the LTP at 134.65 and it filled at once. A BUY limit means "at 140 **or cheaper**". What they wanted was a broker **Buy StopLimit**: wait until the price **rises** to 140.
+   - **AlgoDelta `sl_order`** (checked by the user in the Syntax Generator, 23 Nov 2026): `{"type":"sl_order","script_type","script","product","quantity","price","trigger_price","transaction_type":"BUY"}`. It waits **at the exchange** (Upstox status "trigger pending") until LTP ≥ trigger, then it's a limit at `price`.
+   - **Manual Entry:** a 4th mode, **Price | Market | Limit | Stop-limit**, with **Trigger (LTP rises to)** and **Limit price** (default trigger + `STOP_LIMIT_GAP` = 1, editable). The row stays `entry_mode` "limit" with **`entry_trigger`** set, so everything else is the Limit flow (decision 16): app-watched SL/Target/trail, order-book fill tracking, cancel, Delete, 15:15.
+     - The card's Entry box has two inputs (trigger → limit). The Order type box shows **Stop-limit** with "at LTP ≥ x, limit y".
+     - The chip shows `STOP @ 140.00 → LIMIT 141.00` until triggered, then `LIMIT OPEN @ 141.00` → `FILLED @ x`.
+     - ⚡ is refused when the LTP is already ≥ the trigger (it would trigger at once): raise the trigger, or use Limit / Market.
+   - **`limit_orders`:** `mg.trigger` / `mg.triggered`. The order book is matched on `order_type` "SL" plus the trigger price. "trigger pending" = waiting; any other open status, or a fill, = triggered.
+     - **Dry run:** triggers when the live LTP ≥ the trigger, then fills once LTP ≤ the limit, at min(limit, LTP). A spike past the limit stays open, like a real stop-limit.
+   - **Limit-above-LTP warning (all Limit cards):** ⚡ on a BUY limit above the LTP asks "This limit fills immediately", with **Send limit anyway** / **Switch to Stop-limit** (Manual cards: trigger = the price, limit = price + 1; then check the card and ⚡ again) / Cancel. It replaces the 20 % typo popup in that case; stop-limits skip the typo popup.
+   - Stop-limit is Manual Entry only for now (Same strike / Pair / ⭐ keep Strategy | Limit).
+   - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
+- Stop-limit entry (PR #36): `{"type": "sl_order", "script_type": "CE", "script": "NIFTY23NOV2625650CE", "product": "INTRADAY", "quantity": 1, "price": 150, "trigger_price": 150, "transaction_type": "BUY"}` (quantity = lots; the app sends price = the limit, trigger_price = the trigger).
 - Cancel: `{"type": "cancel_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY"}` (no order ID).
 - Square-off: `{"type": "squareoff_position", "script_type": "CE", "script": "NIFTY23NOV2625300CE", "product": "INTRADAY"}`.
 - AlgoDelta has **no modify-SL/Target syntax** (and no modify-order syntax) and no public read API (positions/fills), so live P&L comes from Upstox.
@@ -248,7 +273,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #35: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #36: `claude/affectionate-albattani-a69mce`), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
