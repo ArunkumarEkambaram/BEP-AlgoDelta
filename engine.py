@@ -381,6 +381,20 @@ class Engine:
             self.bump("watch")
         return ok
 
+    async def row_bep(self, name, r):
+        """BEP behind a card, for the "far above BEP" warning (PR #43): a ⭐ card's level, a BEP cross Pair's
+        fired leg BEP, or a Manual Entry strike's BEP (uploaded CSV, else calculated). None for other cards."""
+        if r.get("source") == "star" or (r.get("auto") == "cross" and r.get("opt")):
+            return float(r["price"]) if r.get("price") else None
+        if r.get("source") == "manual" and self.connected and r.get("strike"):
+            mon = self.monitors.get(name)
+            try:
+                v, _src = await run.io_bound(mon.get_bep, self.client, int(r["strike"]))
+            except Exception:
+                return None
+            return float(v) if v is not None else None
+        return None
+
     @staticmethod
     def is_stop(r) -> bool:
         """Stop-limit card (AlgoDelta sl_order): Manual with a trigger, or a card in Stop-limit mode."""

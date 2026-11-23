@@ -1671,6 +1671,15 @@ def make_place(name):
             w = sl_warning(sl, ref, "limit price" if limit else ("entry price" if r.get("entry_price") else "LTP"))
             if w:
                 warns.append(w)
+            thr = float(cfg.get("warn_above_bep", 10) or 0)          # far above BEP (PR #43)
+            bep_v = await engine.row_bep(name, r) if thr > 0 else None
+            if bep_v is not None:
+                if ltp is not None and ltp - bep_v > thr:
+                    warns.append(f"LTP {ltp:.2f} is {ltp - bep_v:.2f} points above BEP {bep_v:.2f} (warning above "
+                                 f"{thr:g}): late entry, bigger risk to the SL.")
+                if limit and lp and lp - bep_v > thr:
+                    warns.append(f"{'Stop-limit' if engine.is_stop(r) else 'Limit'} price {lp:.2f} is "
+                                 f"{lp - bep_v:.2f} points above BEP {bep_v:.2f} (warning above {thr:g}).")
             lvl = r.get("price") if r.get("source") != "manual" and not engine.is_stop(r) else None
             if lvl and ltp is not None and ltp < float(lvl):     # (a stop-limit waits for the rise: no warning)
                 warns.append(f"The price is already back below the {level_name(r)} {float(lvl):g} "
@@ -2317,6 +2326,10 @@ def algodelta_card(name):
                         .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
                     ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
                                            label="SL candle").classes("w-28")
+                ad_warn_bep = ui.number("Warn at \u26a1 when LTP is more than X points above BEP (0 = off)",
+                                        value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
+                    .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
+                             "shows the LTP - BEP difference")
                 ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
                 ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
                 with ui.row().classes("w-full gap-2 no-wrap"):
@@ -2390,6 +2403,9 @@ def algodelta_card(name):
         max_above = num(ad_max_above.value)
         if max_above is None or max_above <= 0:
             return None, "Max points above BEP must be a number above 0."
+        warn_bep = num(ad_warn_bep.value)
+        if warn_bep is None or warn_bep < 0:
+            return None, "Warn above BEP must be a number of 0 or more (0 = off)."
         open_entry, open_sl = num(ad_open_entry.value), num(ad_open_sl.value)
         if open_entry is None or open_sl is None or open_entry < 0 or open_sl < 0:
             return None, "09:15 entry above BEP and SL below BEP must be numbers of 0 or more."
@@ -2403,6 +2419,7 @@ def algodelta_card(name):
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
+                "warn_above_bep": warn_bep,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
