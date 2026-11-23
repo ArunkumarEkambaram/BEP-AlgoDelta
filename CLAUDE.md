@@ -50,6 +50,10 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
    - **One CE and one PE per day.** If both strikes qualify, the one closest to the pre-open price wins. SENT, DRY RUN and FAILED lock the side; BLOCKED frees it. The lock is restored from today's orders file.
    - **No plan before 09:15** (late start or restart) means **no 09:15 order** that day.
    - Still unverified live: whether Upstox's NIFTY value between 09:08 and 09:15 equals the pre-open price. A manual override was offered if it doesn't.
+   - **Entry at BEP + 2 and a CANDLE SL at BEP − 2 (PR #41, user request on 23 Nov):**
+     - Entry: LTP ≥ **BEP + `open_entry_above`** (2) instead of LTP > BEP. The touch, LTP > open, one CE + one PE, `max_above_bep` (still from BEP) and the market `strategy_order` stay. With `open_entry_above` = 0 it's the old LTP > BEP.
+     - SL: a **5-min candle close below BEP − `open_sl_below`** (2), e.g. BEP 150 → exit on a 5-min close below 148 (a wick doesn't exit). It's stored on the order as a CANDLE `c_sl` (`BepMonitor._opening_sl`) and the order is sent with `is_sl` false, so **AlgoDelta holds no SL**: the app squares off (keep the PC on). The Setup trailing SL, if on, is watched by the app too (`c_trail`). The Target stays the Setup Target, held by AlgoDelta.
+     - Setup: "09:15 entry above BEP +" (2), "09:15 SL: close below BEP −" (2), "SL candle" 1 / 3 / 5 min (5) (`open_entry_above`, `open_sl_below`, `open_sl_tf` in `AUTO_ORDER`, saved in settings.json).
 6. **Order Details:** Entry, Exit, LTP, Captured Points (**Exit − Entry** once exited; while open, `x (open)` from the live LTP, decision 22) and P&L ₹ (the same).
    - **Live:** Upstox trade book (`get-trades-for-day`, every 30 s). Fills are matched by option and **shared FIFO between orders on the same option** (PR #10).
    - **Dry run:** entry = LTP at the signal. The exit is **simulated** from 1-min candles using the order's SL/Target/trail (SL first if both hit in the same minute; 15:15 square-off). It's saved in the orders file.

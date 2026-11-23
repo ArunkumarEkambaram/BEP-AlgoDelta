@@ -115,6 +115,9 @@ def _default_auto_order() -> dict:
         "tgt": 50, "sl": 12, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
         "exit_on_opposite": False,
         "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
+        # 09:15 order (PR #41): enters at LTP >= BEP + open_entry_above; its SL is a CANDLE close below
+        # BEP - open_sl_below on open_sl_tf-minute candles, watched by the app (AlgoDelta gets is_sl false)
+        "open_entry_above": 2, "open_sl_below": 2, "open_sl_tf": 5,
         # default targets per Order Management type (the 09:15 opening order uses "tgt" / "tgt_type");
         # each row can override value and type until it is ordered
         "tgt_same": 50, "tgt_pair": 50, "tgt_star": 50, "tgt_manual": 50,

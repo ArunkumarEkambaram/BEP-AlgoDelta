@@ -2280,6 +2280,15 @@ def algodelta_card(name):
                     ad_tgt_manual = ui.number("Manual entry", value=ad_cfg.get("tgt_manual", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
                 ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
                                          value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    ad_open_entry = ui.number("09:15 entry above BEP +", value=ad_cfg.get("open_entry_above", 2),
+                                              min=0, step=0.5).classes("flex-1") \
+                        .tooltip("The 09:15 order fires at LTP >= BEP + this (0 = just above BEP)")
+                    ad_open_sl = ui.number("09:15 SL: close below BEP -", value=ad_cfg.get("open_sl_below", 2),
+                                           min=0, step=0.5).classes("flex-1") \
+                        .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
+                    ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
+                                           label="SL candle").classes("w-28")
                 ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
                 ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
                 with ui.row().classes("w-full gap-2 no-wrap"):
@@ -2353,6 +2362,9 @@ def algodelta_card(name):
         max_above = num(ad_max_above.value)
         if max_above is None or max_above <= 0:
             return None, "Max points above BEP must be a number above 0."
+        open_entry, open_sl = num(ad_open_entry.value), num(ad_open_sl.value)
+        if open_entry is None or open_sl is None or open_entry < 0 or open_sl < 0:
+            return None, "09:15 entry above BEP and SL below BEP must be numbers of 0 or more."
         trail = bool(ad_trail.value)
         t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
         if trail:
@@ -2362,6 +2374,7 @@ def algodelta_card(name):
                 return None, "Gap must not be larger than Trigger (Gap = Trigger moves the SL to cost at the trigger)."
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
+                "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -2387,7 +2400,8 @@ def algodelta_card(name):
         ad_status.set_text(f"✅ {saved} Target {nums['tgt']} ({nums['tgt_type']}; rows: same {nums['tgt_same']:g}, "
                            f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}, manual {nums['tgt_manual']:g}), SL {nums['sl']} ({nums['sl_type']}), "
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
-                           f"09:15 order only if LTP is < {nums['max_above_bep']} above BEP; "
+                           f"09:15 order at LTP >= BEP + {nums['open_entry_above']:g} and < BEP + {nums['max_above_bep']}, "
+                           f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app); "
                            f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                            f"(live orders need both).")
 
