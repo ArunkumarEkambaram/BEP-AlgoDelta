@@ -120,6 +120,9 @@ def _default_auto_order() -> dict:
         "open_entry_above": 2, "open_sl_below": 2, "open_sl_tf": 5,
         # PR #47: a hard max SL held by AlgoDelta (POINT, from its fill) on top of the app CANDLE SL; 0 = none
         "open_max_sl": 17,
+        # Testing feature (24 Nov): once one side (CE / PE) has its 09:15 order, the other side may follow only
+        # within this many seconds of it; later it is restricted for the day (0 = off)
+        "open_second_side_secs": 60,
         # ⚡ on a BEP card (⭐ / BEP cross Pair / Manual Entry): "Check before placing" when the LTP (or the limit
         # price) is more than this many points above the strike's BEP (PR #43; 0 = off)
         "warn_above_bep": 10,

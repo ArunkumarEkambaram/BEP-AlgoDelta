@@ -2458,6 +2458,11 @@ def algodelta_card(name):
                                         value=ad_cfg.get("open_max_sl", 17), min=0, step=1).classes("w-full") \
                     .tooltip("A POINT SL held by AlgoDelta from its fill (e.g. entry 152 - 17 = 135), on top of the "
                              "candle SL: exits on a fast fall or if this PC is off. The trailing SL stays with the app.")
+                ad_open_second = ui.number("09:15 second side within (seconds, 0 = off)",
+                                           value=ad_cfg.get("open_second_side_secs", 60), min=0, step=5) \
+                    .classes("w-full") \
+                    .tooltip("Testing: once CE or PE has its 09:15 order, the other side may follow only within this "
+                             "many seconds; later it is restricted for the day. Both within the window = both placed.")
                 ad_warn_bep = ui.number("Warn at \u26a1 when LTP is more than X points above BEP (0 = off)",
                                         value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
                     .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
@@ -2535,6 +2540,9 @@ def algodelta_card(name):
         max_above = num(ad_max_above.value)
         if max_above is None or max_above <= 0:
             return None, "Max points above BEP must be a number above 0."
+        open_second = num(ad_open_second.value)
+        if open_second is None or open_second < 0:
+            return None, "09:15 second side window must be a number of 0 or more seconds (0 = off)."
         warn_bep = num(ad_warn_bep.value)
         if warn_bep is None or warn_bep < 0:
             return None, "Warn above BEP must be a number of 0 or more (0 = off)."
@@ -2554,7 +2562,7 @@ def algodelta_card(name):
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
-                "open_max_sl": open_max, "warn_above_bep": warn_bep,
+                "open_max_sl": open_max, "open_second_side_secs": open_second, "warn_above_bep": warn_bep,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -2582,7 +2590,9 @@ def algodelta_card(name):
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
                            f"09:15 order at LTP >= BEP + {nums['open_entry_above']:g} and < BEP + {nums['max_above_bep']}, "
                            f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app)"
-                           + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta); " if nums['open_max_sl'] else "; ")
+                           + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta)" if nums['open_max_sl'] else "")
+                           + (f", second side within {nums['open_second_side_secs']:g} s; "
+                              if nums['open_second_side_secs'] else ", second side any time; ")
                            + f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                            f"(live orders need both).")
 
