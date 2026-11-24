@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #51; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #52; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -13,7 +13,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
 - After merging, the user runs `git pull origin main` and restarts the app.
 - `__pycache__/`, `settings.json`, `upstox_token.json`, `orders_*.csv` and `common_watch_*.json` are git-ignored. Never commit them.
 - The cloud session can't delete GitHub branches (proxy 403). The user deletes merged branches, or turns on "Automatically delete head branches".
-- **New features and fixes go into BOTH projects** (BEP-AlgoDelta and BEP_Upstox) until one is retired (user, 24 Nov): one PR per repo, and remind the user to merge both. Example: the NIFTY change % (PR #50 here, BEP_Upstox PR #6).
+- **New features and fixes go into BOTH projects** (BEP-AlgoDelta and BEP_Upstox) until one is retired (user, 24 Nov): one PR per repo, and remind the user to merge both. Examples: the NIFTY change % (PR #50 here, BEP_Upstox PR #6), max loss per day (PR #52 here, BEP_Upstox PR #7).
 
 ## Architecture (after PR #3)
 - `engine.py`: **one background engine** for the whole app (`app.timer`). It handles the Upstox connection, scans, the 09:15 order, Order Management, orders, tracking, log and alerts. Pages only read its state; version counters trigger redraws, and events trigger toasts and browser notifications in every tab.
@@ -277,7 +277,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
 
 30. **NIFTY change % in the header (user, 24 Nov; the same change in BEP_Upstox, its decision 9).** The header chip shows `NIFTY 26,050.35  +448.10 (+1.75%)`, green up / red down. `Engine.fetch_index_ltps` uses the Upstox **full market quote** (`GET /v2/market-quote/quotes`, `upstox_client.fetch_quote`: `last_price` + `net_change`) instead of the LTP call: the same one call per scan. % = net change ÷ (LTP − net change) × 100 (`Engine.index_change`). Before 09:15 and on holidays it is the last session's change (on 24 Nov it should read +1.75 %). If the full quote fails: the plain LTP call, no change for that scan, one Log line. Header only.
 
-31. **Max loss per day (user, 24 Nov; the same in BEP_Upstox, its decision 10; all suggested).** Setup › Trading **"Max loss per day (₹, 0 = off; Dry run only for now)"** (`max_loss_day` in `AUTO_ORDER`, default 2000, saved in settings.json when you leave the box). **For now only in Dry run** (Live later, after testing): day loss = today's closed + open P&L of the **DRY RUN** orders (`Engine.max_loss_state`); the limit is hit at a loss ≥ the value.
+31. **Max loss per day (PR #52, merged 24 Nov; user, 24 Nov; the same in BEP_Upstox, its decision 10 / PR 7; all suggested).** Setup › Trading **"Max loss per day (₹, 0 = off; Dry run only for now)"** (`max_loss_day` in `AUTO_ORDER`, default 2000, saved in settings.json when you leave the box). **For now only in Dry run** (Live later, after testing): day loss = today's closed + open P&L of the **DRY RUN** orders (`Engine.max_loss_state`); the limit is hit at a loss ≥ the value.
    - **⚡ / Add & place** (first of the ⚡ checks): popup "Max loss per day reached: Day loss ₹2,350 is past your max loss ₹2,000", **Place anyway** / Cancel. Place anyway marks the card (`loss_ok`, `Engine.ack_max_loss`, logged), so a PENDING entry armed then still fires.
    - **Orders nobody clicks** (a PENDING card firing later): not placed, card BLOCKED (⚡ can be pressed again), toast + Log "Max loss per day reached (loss ₹x, limit ₹y); NOT sent" (`Engine._max_loss_block`, before `send_order` / `send_limit` of a card).
    - **The 09:15 order is not affected** (user: "This loss limit is not applicable for 9:15 order"; `dispatch_orders` doesn't check it). Open positions are left alone (no auto square-off).
@@ -326,15 +326,16 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
       - **AlgoDelta:** compliance and empanelment; will the static IP add-on continue (date, notice); is "algo on my PC + AlgoDelta's IP" accepted; who collects the undertaking; will webhooks keep working; algo ID / registration / order-per-second limit; refund; what happens to open positions and pending SL/Target if suspended.
       - **Upstox:** how to register as a tech-savvy retail client and the undertaking text; algo registration and the order-per-second threshold; registering a cloud static IP (AWS Elastic IP / Lightsail, Mumbai), how many and how to change; which order APIs are allowed (place/modify/cancel by ID, SL/SL-M, GTT, single-position exit); which calls don't need the IP; charges; rate limits; moving off the third-party platform; emergency exit if it stops.
     - **Waiting on the user:** the replies from AlgoDelta and Upstox. When they arrive, turn them into the cloud server + Upstox direct plan.
-- **BEP Upstox: BUILT on 24 Nov 2026 in `ArunkumarEkambaram/BEP_Upstox`** (default branch `master`, port 8084, its own settings / orders files; its own CLAUDE.md has every decision). PRs 1–6 merged on 24 Nov:
+- **BEP Upstox: BUILT on 24 Nov 2026 in `ArunkumarEkambaram/BEP_Upstox`** (default branch `master`, port 8084, its own settings / orders files; its own CLAUDE.md has every decision). PRs 1–7 merged on 24 Nov:
   1. copy of this repo's `main` (with history) renamed "BEP Upstox", port 8084;
   2. a broker layer (`brokers/`: an interface like .NET dependency injection, so another broker can be added later; Upstox v3 orders; a paper broker for Dry run) and a Setup "Broker orders" card: mode **Dry run / Sandbox / Live**, market protection, sandbox token, Test order panel;
   3. **AlgoDelta removed there**: entry = market BUY; after the fill an **SL-M at the exchange**; trailing **modifies** it; target / candle SL / Pair opponent / square-off / 15:15 turn that SL into MARKET (one sell order, this order only); NO SL alert; "Order defaults" replaces the AlgoDelta settings, plus a max SL (17) for CANDLE-only SLs;
   4. Limit / Stop-limit as real LIMIT / SL BUY orders, partial fills, cancel by order ID (this order only);
   5. password login (30 days) and cloud scripts (`deploy/`: AWS Lightsail Mumbai, static IP, Tailscale, a systemd service, `update.sh`);
-  6. NIFTY change % in the header (the same as PR #50 here).
+  6. NIFTY change % in the header (the same as PR #50 here);
+  7. max loss per day, Dry run only, 09:15 exempt (the same as PR #52 here).
   - GTT was checked and kept for later (its trailing can't do decision 4's rule; not in the sandbox).
-  - **Next (testing, no code):** Dry run on the PC on trading days → Sandbox (sandbox token) → set up the server together (Sat 28 – Sun 29 Nov) and register its static IP in Upstox after market hours → 1-lot live tests from 30 Nov → decide on Fri 11 Dec whether to switch or renew AlgoDelta for a month.
+  - **Next (testing, no code):** Dry run on the PC on trading days (also the max loss in both apps: a low test limit, e.g. ₹100, to see the popup, the MAX LOSS badge and a BLOCKED PENDING card; Live use decided after that) → Sandbox (sandbox token) → set up the server together (Sat 28 – Sun 29 Nov) and register its static IP in Upstox after market hours → 1-lot live tests from 30 Nov → decide on Fri 11 Dec whether to switch or renew AlgoDelta for a month.
 - *The plan as agreed on 23 Nov (kept for reference; built as above):*
 - **PLANNED: a separate "BEP Upstox" app (Upstox direct + cloud), agreed 23 Nov 2026; start on 24 Nov (market holiday).** This app (AlgoDelta) stays unchanged and in use until BEP Upstox is proven live. **Target: switch before the AlgoDelta subscription ends (joined 15 Nov 2026, paid to about 14 Dec).**
   - **Estimate given (23 Nov):** about a quarter of the code changes (1,500–2,500 lines over 6–8 PRs). Unchanged: BEP Support, ⭐, Pair cross, Replay, Order Management triggers, exit rules, Order Details. Replaced: `order_bridge.py` → a new `upstox_orders.py` (place market / limit / SL, modify, cancel by order ID, exit a position, errors, rate limits). The biggest change is in `engine.py`: the app holds the SL / Target / trail itself instead of one `strategy_order`. `limit_orders.py` gets simpler (match by order ID). Square-off becomes per order. `app.py` Setup: the AlgoDelta section → Upstox order settings. Tokens: roughly 1 to 1.5× the PR #36–#45 session (about 3–6 M processed, mostly cached re-reads), spread over several sessions. Live 1-lot tests take the most time.
