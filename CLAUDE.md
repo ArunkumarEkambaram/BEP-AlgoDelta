@@ -297,6 +297,13 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Top row: **Upstox**, **BEP files**, **Scanner**, **Trading** (min width 250 px so all four fit on one row on a wide screen). Trading's max loss box is "Max loss per day ₹ (0 = off)" with the note "Dry run only for now; the 09:15 order is not affected" below it.
    - **NIFTY — AlgoDelta order settings**, two per row: **AlgoDelta connection** (webhook, JSON template, "I checked this JSON") · **Default order (all orders)** (quantity, Target, SL, Trailing SL, Exit on opposite) · **Order Management** (per-type default targets, Warn at ⚡ above BEP) · **09:15 opening order** (max above BEP, entry / SL / candle, max SL, second-side window). One **Save** + Preview JSON at the bottom, as before.
 
+34. **The 09:15 order's own trailing SL (user, 24 Nov; also BEP_Upstox, its decision 12; suggested except the defaults).**
+   - **Setup › 09:15 opening order:** a **"09:15 trailing SL" switch, ON by default**, with **Trigger 20, Point 1, Gap 19** (`open_trail`, `open_trail_trigger` / `_point` / `_gap`, saved in settings.json; Gap ≤ Trigger). It replaces the Default order trail for the 09:15 order (that one still applies to Order Management cards). Watched by the app as `c_trail` (`BepMonitor._opening_sl`); AlgoDelta's max SL stays fixed.
+   - **Order Details:** the open 09:15 order's SL / Target button opens **only the trailing popup** (`opening_trail_dialog`): Set / Change / Remove, until it exits or is squared off (`Engine.order_trail_editable`, `is_opening`). The candle SL, AlgoDelta's max SL and the Target can't be changed there.
+   - **A change never moves the SL down:** the new trail keeps the high seen so far (and the current LTP) and the old level as a `floor` (`Engine.trail_level`). E.g. entry 152, high 180, trail 20/19 → SL 161; changed to 30/25 → stays 161; changed to 10/5 → 175.
+   - **"Check the stoploss":** when the new SL would be at or above the LTP (an exit at once), the popup asks first (Set anyway / Cancel).
+   - Checked: the signal carries the 09:15 trail (and none when OFF); the engine path above; Setup shows the fields; Order Details changed 20/19 → 30/25 with no page errors.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -399,4 +406,4 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
     2. Build Upstox direct **alongside** AlgoDelta, with a Setup switch "AlgoDelta / Upstox direct"; test with 1 lot.
     3. Drop AlgoDelta once direct is proven.
   - **Next step when resumed:** read the AlgoDelta / Upstox replies to the circular questions, then write up the questions for the cloud server and the Upstox direct module.
-- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; per-order trailing for the 09:15 order (it uses Setup); "Modify price" for a limit (cancel + new limit; declined for now); the **Upstox WebSocket market feed** (prices pushed in real time instead of the 2 s polling; read-only, no static IP; medium effort, later).
+- **Ideas offered but not built:** a manual pre-open override; an AlgoDelta exit webhook for other features; "Modify price" for a limit (cancel + new limit; declined for now); the **Upstox WebSocket market feed** (prices pushed in real time instead of the 2 s polling; read-only, no static IP; medium effort, later).

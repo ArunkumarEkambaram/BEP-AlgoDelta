@@ -123,6 +123,9 @@ def _default_auto_order() -> dict:
         # Testing feature (24 Nov): once one side (CE / PE) has its 09:15 order, the other side may follow only
         # within this many seconds of it; later it is restricted for the day (Setup switch, ON by default)
         "open_second_side": True, "open_second_side_secs": 60,
+        # The 09:15 order's own trailing SL (watched by the app; independent of the Default order trail):
+        # once the high reaches entry + trigger, SL = high - gap in steps of point, never down
+        "open_trail": True, "open_trail_trigger": 20, "open_trail_point": 1, "open_trail_gap": 19,
         # ⚡ on a BEP card (⭐ / BEP cross Pair / Manual Entry): "Check before placing" when the LTP (or the limit
         # price) is more than this many points above the strike's BEP (PR #43; 0 = off)
         "warn_above_bep": 10,
