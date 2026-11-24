@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #52; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #53; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -282,6 +282,16 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - **Orders nobody clicks** (a PENDING card firing later): not placed, card BLOCKED (⚡ can be pressed again), toast + Log "Max loss per day reached (loss ₹x, limit ₹y); NOT sent" (`Engine._max_loss_block`, before `send_order` / `send_limit` of a card).
    - **The 09:15 order is not affected** (user: "This loss limit is not applicable for 9:15 order"; `dispatch_orders` doesn't check it). Open positions are left alone (no auto square-off).
    - Header: a red **MAX LOSS ₹2,350 / 2,000** badge once hit.
+
+32. **09:15 second-side window (TESTING feature, user 24 Nov; BEP-AlgoDelta only, all suggested).** Once one side (CE or PE) has its 09:15 order, the other side may follow only within **`open_second_side_secs`** (60 s) of that order's time (e.g. CE at 09:15:20 → PE allowed until 09:16:20). After that, the other side is **restricted** for the day (`BepMonitor._restrict_second_side`, run at the start of each `opening_tick`; lock status `restricted`).
+   - Only orders that lock a side start the window (SENT / DRY RUN / FAILED). BLOCKED frees the side, so it doesn't.
+   - Both qualifying in the same second or within 60 s → both are placed.
+   - Log line: "PE 09:15 order restricted: CE was ordered at 09:15:20, more than 60 s ago". Dashboard 09:15 status: "PE: restricted (CE at 09:15:20)".
+   - Setup: a **"09:15 second side window" switch** (ON by default; `open_second_side`) + **"Second side within (seconds)"** (60, > 0, greyed out when OFF; `open_second_side_secs`), both saved in settings.json. OFF = the old behaviour (each side any time 09:15–09:20). (The first version used 0 = off; the user asked for a switch instead.)
+   - A restart reads the first order's time back from today's orders file, so the window still applies.
+   - Only the automatic 09:15 order is affected: a restricted side does **not** skip the 09:15 ⭐ row (only a real 09:15 order does).
+   - **Not ported to BEP_Upstox yet** (user: testing feature; recorded in BEP_Upstox's CLAUDE.md "to port later").
+   - Checked: a simulated tick with CE at 09:15:20 → PE at 09:15:50 placed, PE at 09:16:30 restricted, with the switch OFF placed; the Setup page shows the field.
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.

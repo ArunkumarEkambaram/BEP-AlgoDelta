@@ -934,7 +934,8 @@ class Engine:
             if not e.get("in_window"):
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} not added to Order Management (outside ATM window).")
                 continue
-            if e["time"] == "09:15" and (e.get("day"), e["opt"]) in mon.side_lock:
+            if e["time"] == "09:15" and (mon.side_lock.get((e.get("day"), e["opt"])) or {}).get("status") \
+                    not in (None, "restricted"):
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to Order Management "
                          f"({e['opt']} already has its 09:15 opening order).")
                 continue

@@ -166,11 +166,38 @@ class BepMonitor:
         parts = []
         for opt in ("CE", "PE"):
             lk = self.side_lock.get((day, opt))
-            if lk:
+            if lk and lk.get("status") == "restricted":
+                parts.append(f"{opt}: restricted ({lk['by']} at {lk['by_time']})")
+            elif lk:
                 parts.append(f"{opt}: ordered {lk['strike']} at {lk['time']} ({names.get(lk['status'], lk['status'])})")
             else:
                 parts.append(f"{opt}: open")
         return "09:15 orders today \u2014 " + " \u00b7 ".join(parts)
+
+    def _restrict_second_side(self, day, now, log_fn):
+        """Second-side window (testing feature, user 24 Nov): once one side has its 09:15 order (SENT / DRY RUN /
+        FAILED; BLOCKED frees the side), the other side may follow only within open_second_side_secs seconds of
+        that order's time. After that it is restricted for the day. Setup switch open_second_side OFF = no window."""
+        cfg = config.AUTO_ORDER.get(self.name, {})
+        if not cfg.get("open_second_side", True):
+            return
+        raw = cfg.get("open_second_side_secs", 60)
+        secs = 60.0 if raw is None or raw == "" else float(raw)
+        if secs <= 0:
+            return
+        for opt, other in (("CE", "PE"), ("PE", "CE")):
+            first = self.side_lock.get((day, opt))
+            if not first or first.get("status") == "restricted" or (day, other) in self.side_lock:
+                continue
+            try:
+                t = datetime.strptime(f"{day} {first['time']}", "%Y-%m-%d %H:%M:%S").replace(tzinfo=now.tzinfo)
+            except (TypeError, ValueError):
+                continue
+            if (now - t).total_seconds() > secs:
+                self.side_lock[(day, other)] = {"strike": None, "time": now.strftime("%H:%M:%S"),
+                                                "status": "restricted", "by": opt, "by_time": first["time"]}
+                log_fn(f"BEP {self.name}: {other} 09:15 order restricted: {opt} was ordered at {first['time']}, "
+                       f"more than {secs:g} s ago - no {other} opening order today.")
 
     def _queue_order(self, opt, strike, level, ltp, now):
         if config.AUTO_ORDER_PAUSED:
@@ -255,6 +282,7 @@ class BepMonitor:
         """09:15:00-09:20: one Upstox OHLC call for the prepared strikes. A strike qualifies when its day low
         (= first candle low) touched BEP and LTP is above the open and above BEP, but less than max_above_bep
         points above BEP. At most ONE CE and ONE PE per day (closest to the pre-open price if both qualify).
+        Once one side is ordered, the other side only within open_second_side_secs (60 s; _restrict_second_side).
         No plan prepared before 09:15 -> no opening order today."""
         if not (SESSION_FIRST_CANDLE <= now.time() < dtime(9, 15 + CANDLE_MINUTES)) or not market_utils.is_trading_day(now):
             return
@@ -268,6 +296,7 @@ class BepMonitor:
             return
         if config.AUTO_ORDER_PAUSED:
             return
+        self._restrict_second_side(day, now, log_fn)
         open_sides = [opt for opt in ("CE", "PE") if (day, opt) not in self.side_lock]
         if not open_sides:
             return
