@@ -189,6 +189,9 @@ def root():
         mode_badge = ui.badge("").props("rounded")
         app_sl_badge = ui.badge("").props("rounded color=red-9").classes("text-sm px-2 py-1")
         app_sl_badge.tooltip("Limit orders: the SL / Target are watched by this app - keep this PC on and the app running")
+        loss_badge = ui.badge("").props("rounded color=red-9").classes("text-sm px-2 py-1")
+        loss_badge.tooltip("Max loss per day (Dry run orders, closed + open P&L): new orders ask first; a PENDING "
+                           "card that fires is not placed; the 09:15 order is not affected")
         alerts_badge = ui.badge("ALERTS PAUSED").props("rounded color=red")
         alert_btn = ui.button("", on_click=engine.toggle_alerts).props("dense no-caps")
         algo_btn = ui.button("", on_click=engine.toggle_algo_pause).props("dense no-caps")
@@ -217,6 +220,9 @@ def root():
         app_sl_badge.set_text(" · ".join(([f"APP-MANAGED SL ACTIVE ({la['held']}) - keep this PC on"] if la["held"] else [])
                                          + ([f"LIMIT OPEN ({la['waiting']})"] if la["waiting"] else [])))
         app_sl_badge.set_visibility(bool(la["held"] or la["waiting"]))
+        ml = engine.max_loss_state(names[0] if names else None)
+        loss_badge.set_text(f"MAX LOSS ₹{ml['loss']:,.0f} / {ml['limit']:,.0f}")
+        loss_badge.set_visibility(ml["hit"])
         alerts_badge.set_visibility(config.ALERTS_PAUSED)
         alert_btn.set_text("Resume alerts" if config.ALERTS_PAUSED else "Pause alerts")
         alert_btn.props("icon=" + ("notifications_active color=green" if config.ALERTS_PAUSED
@@ -1724,6 +1730,15 @@ def make_place(name):
         r = engine.watches[name].get(row_id)
         if not r:
             return
+        if engine.max_loss_state(name)["hit"] and not r.get("loss_ok"):   # max loss per day: asks first
+            def anyway():
+                engine.ack_max_loss(name, row_id)
+                return place(row_id)
+            confirm_warnings("Max loss per day reached",
+                             [engine.max_loss_text(name),
+                              "Place this order anyway? (Setup › Trading › Max loss per day; 0 = off)"],
+                             anyway, "Place anyway")
+            return
 
         async def do():
             if r.get("entry_mode") == "limit":
@@ -2386,6 +2401,15 @@ def setup_page():
             dry.on_value_change(on_dry)
             ui.number("Max orders/day", value=config.AUTO_ORDER_DAILY_LIMIT, min=1, precision=0, step=1,
                       on_change=lambda ev: engine.set_daily_limit(int(ev.value or 1))).classes("w-full")
+            first = next(iter(config.AUTO_ORDER))
+            max_loss = ui.number("Max loss per day (₹, 0 = off; Dry run only for now)",
+                                 value=config.AUTO_ORDER[first].get("max_loss_day", 2000), min=0, step=100) \
+                .classes("w-full")
+            max_loss.on("blur", lambda: engine.set_max_loss(max_loss.value))     # saved when you leave the box
+            max_loss.on("keydown.enter", lambda: engine.set_max_loss(max_loss.value))
+            max_loss.tooltip("Today's closed + open P&L of the Dry run orders. Once the loss reaches this: \u26a1 / "
+                         "Add & place ask first, a PENDING card that fires is not placed, open positions are left "
+                         "alone. The 09:15 order is not affected.")
             ui.label("Pause alerts / Pause algo are in the header.").classes("text-xs opacity-70")
 
     for name in config.INDEXES:

@@ -243,6 +243,52 @@ class Engine:
                 "open": len(opens), "open_pnl": round(sum(x[1] for x in opens), 2),
                 "pnl": round(sum(pnl), 2), "wins": sum(1 for p in pts if p > 0)}
 
+    def max_loss_state(self, name=None) -> dict:
+        """Max loss per day (Setup › Trading, default ₹2,000; 0 = off). For now only in Dry run and only DRY RUN
+        orders count: today's closed P&L + open P&L. `hit` = the loss reached the limit (new orders ask first /
+        are not placed; the 09:15 order is exempt)."""
+        name = name or next(iter(config.AUTO_ORDER))
+        limit = float(config.AUTO_ORDER.get(name, {}).get("max_loss_day", 2000) or 0)
+        rows = [r for r in self.order_log if r.get("status") == "DRY RUN"]
+        closed = sum(r["pnl"] for r in rows if isinstance(r.get("pnl"), (int, float)))
+        opn = sum(x[1] for x in (self.open_pnl(r) for r in rows) if x)
+        pnl = round(closed + opn, 2)
+        active = bool(config.AUTO_ORDER_DRY_RUN) and limit > 0
+        loss = round(max(0.0, -pnl), 2)
+        return {"limit": limit, "pnl": pnl, "loss": loss, "active": active, "hit": active and loss >= limit}
+
+    def max_loss_text(self, name=None) -> str:
+        m = self.max_loss_state(name)
+        return f"Day loss ₹{m['loss']:,.0f} is past your max loss ₹{m['limit']:,.0f} (Dry run orders, closed + open)."
+
+    def ack_max_loss(self, name, row_id):
+        """⚡ -> 'Place anyway' in the max-loss popup: this card may place (also a PENDING entry armed now)."""
+        r = self.watches[name].get(row_id)
+        if r is not None:
+            r["loss_ok"] = _stamp()
+            self.log(f"{name} {r.get('strike')}{r.get('opt')}: 'Place anyway' past the max loss per day "
+                     f"({self.max_loss_text(name)})")
+
+    def _max_loss_block(self, sig):
+        """A card's entry while the max loss per day is hit and nobody chose 'Place anyway': the blocked result
+        (the 09:15 order never comes here). None = may send."""
+        if sig.pop("loss_ok", False):
+            return None
+        ml = self.max_loss_state(sig["index"])
+        if not ml["hit"]:
+            return None
+        why = f"Max loss per day reached (loss ₹{ml['loss']:,.0f}, limit ₹{ml['limit']:,.0f})"
+        head = f"{sig['index']} {sig['opt']} {sig['strike']} [{sig.get('kind_label', '')}]"
+        return {"status": "blocked", "message": f"{why}; NOT sent: {head}", "payload": {}, "detail": why}
+
+    def set_max_loss(self, value):
+        v = max(0.0, float(value or 0))
+        for name in config.AUTO_ORDER:
+            config.AUTO_ORDER[name]["max_loss_day"] = int(v) if v == int(v) else v
+        settings_store.save()
+        self.log(f"Max loss per day: " + (f"₹{v:,.0f} (Dry run only for now)" if v else "OFF"))
+        self.bump("settings")
+
     # ------------------------------------------------------------------ actions from the pages
     async def connect(self, token: str):
         token = (token or "").strip()
@@ -678,7 +724,8 @@ class Engine:
                     note = f"Entry at price {p['price']:.2f} {arrow} hit, LTP {ltp:.2f} (armed {p['armed_at']})"
                     res = await self.place_watch_order(name, r["id"], fill_ltp=ltp, entry_note=note)
                     if res:
-                        self.notify(f"{name} {r['strike']}{r['opt']}: {note} - order {ORDER_STATUS.get(res['status'], res['status'].upper())}",
+                        self.notify(f"{name} {r['strike']}{r['opt']}: {note} - order {ORDER_STATUS.get(res['status'], res['status'].upper())}"
+                                    + (f" ({res.get('detail')})" if res["status"] == "blocked" else ""),
                                     {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"),
                                     f"{name} entry {r['strike']}{r['opt']}")
 
@@ -748,11 +795,12 @@ class Engine:
                "ltp": ltp,
                "entry_note": entry_note,
                "expiry": mon.expiry, "order_type": "strategy_order", "kind": kind,
-               "kind_label": label, "time": _stamp(), "params": params, "app_rules": app_rules}
+               "kind_label": label, "time": _stamp(), "params": params, "app_rules": app_rules,
+               "loss_ok": bool(r.pop("loss_ok", None))}
         r["pending"] = None
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
-        res = await run.io_bound(order_bridge.send_order, sig)
+        res = self._max_loss_block(sig) or await run.io_bound(order_bridge.send_order, sig)
         cw.set_order_status(row_id, ORDER_STATUS.get(res["status"], res["status"]))
         self.log(res["message"])
         self.add_order_row(sig, res)
@@ -1248,11 +1296,11 @@ class Engine:
                + (f", LTP {ltp:.2f} at the click" if ltp is not None else ""),
                "expiry": mon.expiry, "order_type": "sl_order" if trigger else "limit_order", "kind": kind,
                "kind_label": label + (" — stop-limit" if trigger else " — limit"), "time": t, "params": {"qty": lots},
-               "app_rules": app_rules, "trigger": trigger}
+               "app_rules": app_rules, "trigger": trigger, "loss_ok": bool(r.pop("loss_ok", None))}
         r["pending"] = None
         cw.set_order_status(row_id, "sending")
         self.bump("watch")
-        res = await run.io_bound(order_bridge.send_limit, sig)
+        res = self._max_loss_block(sig) or await run.io_bound(order_bridge.send_limit, sig)
         if res["status"] in ("sent", "dry_run"):
             m = {"price": price, "units": lots * config.INDEXES[name]["lot_size"], "state": "OPEN",
                  "msg": "Sent, waiting for the fill", "sent_at": t, "oid": None, "filled": 0, "fill": None,
