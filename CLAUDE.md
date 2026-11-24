@@ -293,6 +293,10 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - **Not ported to BEP_Upstox yet** (user: testing feature; recorded in BEP_Upstox's CLAUDE.md "to port later").
    - Checked: a simulated tick with CE at 09:15:20 → PE at 09:15:50 placed, PE at 09:16:30 restricted, with the switch OFF placed; the Setup page shows the field.
 
+33. **Setup layout in bordered sections (user, 24 Nov; also BEP_Upstox, its decision 11; all suggested).** No setting changed, only where it sits. `setup_section(title, icon, classes)` in `app.py` = a bordered card (`flat bordered`) with a title row.
+   - Top row: **Upstox**, **BEP files**, **Scanner**, **Trading** (min width 250 px so all four fit on one row on a wide screen). Trading's max loss box is "Max loss per day ₹ (0 = off)" with the note "Dry run only for now; the 09:15 order is not affected" below it.
+   - **NIFTY — AlgoDelta order settings**, two per row: **AlgoDelta connection** (webhook, JSON template, "I checked this JSON") · **Default order (all orders)** (quantity, Target, SL, Trailing SL, Exit on opposite) · **Order Management** (per-type default targets, Warn at ⚡ above BEP) · **09:15 opening order** (max above BEP, entry / SL / candle, max SL, second-side window). One **Save** + Preview JSON at the bottom, as before.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).

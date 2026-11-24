@@ -153,6 +153,14 @@ def card_title(text, icon=None):
         ui.label(text).classes("text-md font-bold")
 
 
+def setup_section(title, icon=None, classes="flex-1 min-w-[320px]"):
+    """A bordered Setup section with a title row; use as `with section(...):`."""
+    card = ui.card().props("flat bordered").classes(f"{classes} gap-2")
+    with card:
+        card_title(title, icon)
+    return card
+
+
 # ====================================================================== shell: header + navigation
 @ui.page("/")
 @ui.page("/{_:path}")
@@ -2314,8 +2322,7 @@ def setup_page():
 
     with ui.row().classes("w-full gap-4 items-stretch"):
         # ---- Upstox
-        with ui.card().classes("flex-1 min-w-[320px]"):
-            card_title("Upstox", "key")
+        with setup_section("Upstox", "key", "flex-1 min-w-[250px]"):
             token = ui.input("Upstox access token", password=True, password_toggle_button=True).classes("w-full")
             conn = ui.label(engine.connection_text).classes("text-sm")
 
@@ -2333,8 +2340,7 @@ def setup_page():
             ui.timer(1.0, lambda: conn.set_text(engine.connection_text))
 
         # ---- BEP files
-        with ui.card().classes("flex-1 min-w-[320px]"):
-            card_title("BEP files", "upload_file")
+        with setup_section("BEP files", "upload_file", "flex-1 min-w-[250px]"):
             import bep as _bep
             uploaders = {}
             for name in config.INDEXES:
@@ -2358,8 +2364,7 @@ def setup_page():
                     .classes("w-full")
 
         # ---- Scanner
-        with ui.card().classes("flex-1 min-w-[320px]"):
-            card_title("Scanner", "radar")
+        with setup_section("Scanner", "radar", "flex-1 min-w-[250px]"):
             total = 2 * config.STRIKES_EACH_SIDE + 1
             slider = ui.slider(min=1, max=11, step=2, value=total).classes("w-full")
             ui.label().bind_text_from(slider, "value", lambda v: f"{int(v)} strikes (centre ± {(int(v) - 1) // 2})") \
@@ -2382,8 +2387,7 @@ def setup_page():
                 .props("color=orange-8").classes("w-full")
 
         # ---- Trading controls
-        with ui.card().classes("flex-1 min-w-[320px]"):
-            card_title("Trading", "shield")
+        with setup_section("Trading", "shield", "flex-1 min-w-[250px]"):
             dry = ui.switch("Dry run (only log the JSON, send nothing)", value=config.AUTO_ORDER_DRY_RUN)
 
             def on_dry(ev):
@@ -2402,7 +2406,7 @@ def setup_page():
             ui.number("Max orders/day", value=config.AUTO_ORDER_DAILY_LIMIT, min=1, precision=0, step=1,
                       on_change=lambda ev: engine.set_daily_limit(int(ev.value or 1))).classes("w-full")
             first = next(iter(config.AUTO_ORDER))
-            max_loss = ui.number("Max loss per day (₹, 0 = off; Dry run only for now)",
+            max_loss = ui.number("Max loss per day ₹ (0 = off)",
                                  value=config.AUTO_ORDER[first].get("max_loss_day", 2000), min=0, step=100) \
                 .classes("w-full")
             max_loss.on("blur", lambda: engine.set_max_loss(max_loss.value))     # saved when you leave the box
@@ -2410,6 +2414,7 @@ def setup_page():
             max_loss.tooltip("Today's closed + open P&L of the Dry run orders. Once the loss reaches this: \u26a1 / "
                          "Add & place ask first, a PENDING card that fires is not placed, open positions are left "
                          "alone. The 09:15 order is not affected.")
+            ui.label("Max loss: Dry run only for now; the 09:15 order is not affected.").classes("text-xs opacity-70")
             ui.label("Pause alerts / Pause algo are in the header.").classes("text-xs opacity-70")
 
     for name in config.INDEXES:
@@ -2420,14 +2425,20 @@ def algodelta_card(name):
     ad_cfg = config.AUTO_ORDER[name]
     with ui.card().classes("w-full"):
         card_title(f"{name} — AlgoDelta order settings", "send")
-        with ui.row().classes("w-full gap-6 items-start"):
-            with ui.column().classes("flex-1 min-w-[320px] gap-2"):
+        with ui.row().classes("w-full gap-4 items-stretch"):
+            # ---- AlgoDelta connection
+            with setup_section("AlgoDelta connection", "link"):
                 ad_url = ui.input("Webhook URL (AlgoDelta: Copy Webhook)", value=ad_cfg["webhook_url"],
                                   password=True, password_toggle_button=True).classes("w-full")
                 with ui.row().classes("items-center gap-2"):
                     ui.button("JSON template", icon="edit", on_click=lambda: tpl_dialog.open()) \
                         .props("flat dense no-caps color=primary").classes("underline")
                     tpl_tag = ui.badge("default").props("outline color=grey-6")
+                ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
+                ui.label("Live orders need the webhook and this tick.").classes("text-xs opacity-70")
+
+            # ---- Default order (all orders)
+            with setup_section("Default order (all orders)", "tune"):
                 ad_qty = ui.number("Quantity (lots)", value=ad_cfg["qty"], min=1, precision=0, step=1).classes("w-full")
                 with ui.row().classes("w-full gap-2 no-wrap"):
                     ad_tgt_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("tgt_type", "POINT"), label="Target type").classes("flex-1")
@@ -2435,43 +2446,6 @@ def algodelta_card(name):
                 with ui.row().classes("w-full gap-2 no-wrap"):
                     ad_sl_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("sl_type", "POINT"), label="Stop loss type").classes("flex-1")
                     ad_sl = ui.number("Stop loss value", value=ad_cfg["sl"], min=0, step=1).classes("flex-1")
-            with ui.column().classes("flex-1 min-w-[320px] gap-2"):
-                ui.label("Default target for new Order Management rows (each row can be changed until ordered; "
-                         "type follows Target type; the 09:15 order uses Target value)").classes("text-xs opacity-70")
-                with ui.row().classes("w-full gap-2 no-wrap"):
-                    ad_tgt_same = ui.number("Same strike", value=ad_cfg.get("tgt_same", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
-                    ad_tgt_pair = ui.number("Pair", value=ad_cfg.get("tgt_pair", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
-                    ad_tgt_star = ui.number("BEP Support \u2b50", value=ad_cfg.get("tgt_star", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
-                    ad_tgt_manual = ui.number("Manual entry", value=ad_cfg.get("tgt_manual", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
-                ad_max_above = ui.number("09:15 order: max points above BEP (skip at or above)",
-                                         value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
-                with ui.row().classes("w-full gap-2 no-wrap"):
-                    ad_open_entry = ui.number("09:15 entry above BEP +", value=ad_cfg.get("open_entry_above", 2),
-                                              min=0, step=0.5).classes("flex-1") \
-                        .tooltip("The 09:15 order fires at LTP >= BEP + this (0 = just above BEP)")
-                    ad_open_sl = ui.number("09:15 SL: close below BEP -", value=ad_cfg.get("open_sl_below", 2),
-                                           min=0, step=0.5).classes("flex-1") \
-                        .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
-                    ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
-                                           label="SL candle").classes("w-28")
-                ad_open_max = ui.number("09:15 max SL: points below the fill (AlgoDelta, 0 = none)",
-                                        value=ad_cfg.get("open_max_sl", 17), min=0, step=1).classes("w-full") \
-                    .tooltip("A POINT SL held by AlgoDelta from its fill (e.g. entry 152 - 17 = 135), on top of the "
-                             "candle SL: exits on a fast fall or if this PC is off. The trailing SL stays with the app.")
-                with ui.row().classes("w-full gap-2 no-wrap items-center"):
-                    ad_open_second_on = ui.switch("09:15 second side window",
-                                                  value=bool(ad_cfg.get("open_second_side", True))) \
-                        .tooltip("Testing: once CE or PE has its 09:15 order, the other side may follow only within "
-                                 "the seconds set here; later it is restricted for the day. Both within the window = "
-                                 "both placed. OFF = each side any time 09:15-09:20.")
-                    ad_open_second = ui.number("Second side within (seconds)",
-                                               value=ad_cfg.get("open_second_side_secs", 60), min=1, step=5) \
-                        .classes("flex-1").bind_enabled_from(ad_open_second_on, "value")
-                ad_warn_bep = ui.number("Warn at \u26a1 when LTP is more than X points above BEP (0 = off)",
-                                        value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
-                    .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
-                             "shows the LTP - BEP difference")
-                ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
                 ad_trail = ui.switch("Trailing SL", value=ad_cfg.get("trail", False))
                 with ui.row().classes("w-full gap-2 no-wrap"):
                     ad_trail_type = ui.select(["POINT", "LTP"], value=ad_cfg.get("trail_type", "LTP"), label="Trail type").classes("flex-1")
@@ -2480,11 +2454,55 @@ def algodelta_card(name):
                     ad_trail_gap = ui.number("Gap", value=ad_cfg.get("trail_gap", 20), min=0, step=1).classes("flex-1")
                 for w in (ad_trail_type, ad_trail_trigger, ad_trail_point, ad_trail_gap):
                     w.bind_enabled_from(ad_trail, "value")
-                ad_confirm = ui.checkbox("I checked this JSON against the Syntax Generator", value=ad_cfg["confirmed"])
-        ad_status = ui.label("").classes("text-sm")
-        with ui.row().classes("gap-2"):
+                ad_exit_opp = ui.switch("Exit on opposite signal", value=ad_cfg.get("exit_on_opposite", False))
+
+        with ui.row().classes("w-full gap-4 items-stretch"):
+            # ---- Order Management
+            with setup_section("Order Management", "list_alt"):
+                ui.label("Default target for new rows (each row can be changed until ordered; type follows "
+                         "the Default order Target type)").classes("text-xs opacity-70")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    ad_tgt_same = ui.number("Same strike", value=ad_cfg.get("tgt_same", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_pair = ui.number("Pair", value=ad_cfg.get("tgt_pair", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_star = ui.number("BEP Support \u2b50", value=ad_cfg.get("tgt_star", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                    ad_tgt_manual = ui.number("Manual entry", value=ad_cfg.get("tgt_manual", ad_cfg["tgt"]), min=0, step=1).classes("flex-1")
+                ad_warn_bep = ui.number("Warn at \u26a1 when LTP is more than X points above BEP (0 = off)",
+                                        value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
+                    .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
+                             "shows the LTP - BEP difference")
+
+            # ---- 09:15 opening order
+            with setup_section("09:15 opening order", "alarm"):
+                ui.label("Target = the Default order Target value.").classes("text-xs opacity-70")
+                ad_max_above = ui.number("Max points above BEP (skip at or above)",
+                                         value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    ad_open_entry = ui.number("Entry above BEP +", value=ad_cfg.get("open_entry_above", 2),
+                                              min=0, step=0.5).classes("flex-1") \
+                        .tooltip("The 09:15 order fires at LTP >= BEP + this (0 = just above BEP)")
+                    ad_open_sl = ui.number("SL: close below BEP -", value=ad_cfg.get("open_sl_below", 2),
+                                           min=0, step=0.5).classes("flex-1") \
+                        .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
+                    ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
+                                           label="SL candle").classes("w-28")
+                ad_open_max = ui.number("Max SL: points below the fill (AlgoDelta, 0 = none)",
+                                        value=ad_cfg.get("open_max_sl", 17), min=0, step=1).classes("w-full") \
+                    .tooltip("A POINT SL held by AlgoDelta from its fill (e.g. entry 152 - 17 = 135), on top of the "
+                             "candle SL: exits on a fast fall or if this PC is off. The trailing SL stays with the app.")
+                with ui.row().classes("w-full gap-2 no-wrap items-center"):
+                    ad_open_second_on = ui.switch("Second side window",
+                                                  value=bool(ad_cfg.get("open_second_side", True))) \
+                        .tooltip("Testing: once CE or PE has its 09:15 order, the other side may follow only within "
+                                 "the seconds set here; later it is restricted for the day. Both within the window = "
+                                 "both placed. OFF = each side any time 09:15-09:20.")
+                    ad_open_second = ui.number("Second side within (seconds)",
+                                               value=ad_cfg.get("open_second_side_secs", 60), min=1, step=5) \
+                        .classes("flex-1").bind_enabled_from(ad_open_second_on, "value")
+
+        with ui.row().classes("items-center gap-2"):
             ui.button("Save", icon="save", on_click=lambda: save())
             ui.button("Preview JSON", on_click=lambda: preview()).props("outline")
+        ad_status = ui.label("").classes("text-sm")
 
     with ui.dialog() as tpl_dialog, ui.card().style("width: 720px; max-width: 95vw"):
         ui.label(f"{name} — JSON template (strategy_order)").classes("text-lg font-bold")
