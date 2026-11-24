@@ -273,6 +273,8 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
      - At ⚡: "Check before placing" adds "Target is None and the trailing SL is OFF: this order exits only by the SL, a manual square-off or 15:15" when the card's trail is off.
      - The 09:15 order is unchanged (Setup target).
 
+30. **NIFTY change % in the header (user, 24 Nov; the same change in BEP_Upstox, its decision 9).** The header chip shows `NIFTY 26,050.35  +448.10 (+1.75%)`, green up / red down. `Engine.fetch_index_ltps` uses the Upstox **full market quote** (`GET /v2/market-quote/quotes`, `upstox_client.fetch_quote`: `last_price` + `net_change`) instead of the LTP call: the same one call per scan. % = net change ÷ (LTP − net change) × 100 (`Engine.index_change`). Before 09:15 and on holidays it is the last session's change (on 24 Nov it should read +1.75 %). If the full quote fails: the plain LTP call, no change for that scan, one Log line. Header only.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
