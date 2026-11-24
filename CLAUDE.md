@@ -1,8 +1,9 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #48; PR #49 open; updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #50; updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
-Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
+Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
+**This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
 
 ## Working rules agreed with the user
 - **Always discuss requirements before writing code.** Ask questions with "Suggested:" answers and wait for the user's go-ahead.
@@ -12,6 +13,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
 - After merging, the user runs `git pull origin main` and restarts the app.
 - `__pycache__/`, `settings.json`, `upstox_token.json`, `orders_*.csv` and `common_watch_*.json` are git-ignored. Never commit them.
 - The cloud session can't delete GitHub branches (proxy 403). The user deletes merged branches, or turns on "Automatically delete head branches".
+- **New features and fixes go into BOTH projects** (BEP-AlgoDelta and BEP_Upstox) until one is retired (user, 24 Nov): one PR per repo, and remind the user to merge both. Example: the NIFTY change % (PR #50 here, BEP_Upstox PR #6).
 
 ## Architecture (after PR #3)
 - `engine.py`: **one background engine** for the whole app (`app.timer`). It handles the Upstox connection, scans, the 09:15 order, Order Management, orders, tracking, log and alerts. Pages only read its state; version counters trigger redraws, and events trigger toasts and browser notifications in every tab.
@@ -300,7 +302,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PR #50 and later: `claude/dazzling-keller-bxdbcj`, the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
@@ -318,6 +320,16 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
       - **AlgoDelta:** compliance and empanelment; will the static IP add-on continue (date, notice); is "algo on my PC + AlgoDelta's IP" accepted; who collects the undertaking; will webhooks keep working; algo ID / registration / order-per-second limit; refund; what happens to open positions and pending SL/Target if suspended.
       - **Upstox:** how to register as a tech-savvy retail client and the undertaking text; algo registration and the order-per-second threshold; registering a cloud static IP (AWS Elastic IP / Lightsail, Mumbai), how many and how to change; which order APIs are allowed (place/modify/cancel by ID, SL/SL-M, GTT, single-position exit); which calls don't need the IP; charges; rate limits; moving off the third-party platform; emergency exit if it stops.
     - **Waiting on the user:** the replies from AlgoDelta and Upstox. When they arrive, turn them into the cloud server + Upstox direct plan.
+- **BEP Upstox: BUILT on 24 Nov 2026 in `ArunkumarEkambaram/BEP_Upstox`** (default branch `master`, port 8084, its own settings / orders files; its own CLAUDE.md has every decision). PRs 1–6 merged on 24 Nov:
+  1. copy of this repo's `main` (with history) renamed "BEP Upstox", port 8084;
+  2. a broker layer (`brokers/`: an interface like .NET dependency injection, so another broker can be added later; Upstox v3 orders; a paper broker for Dry run) and a Setup "Broker orders" card: mode **Dry run / Sandbox / Live**, market protection, sandbox token, Test order panel;
+  3. **AlgoDelta removed there**: entry = market BUY; after the fill an **SL-M at the exchange**; trailing **modifies** it; target / candle SL / Pair opponent / square-off / 15:15 turn that SL into MARKET (one sell order, this order only); NO SL alert; "Order defaults" replaces the AlgoDelta settings, plus a max SL (17) for CANDLE-only SLs;
+  4. Limit / Stop-limit as real LIMIT / SL BUY orders, partial fills, cancel by order ID (this order only);
+  5. password login (30 days) and cloud scripts (`deploy/`: AWS Lightsail Mumbai, static IP, Tailscale, a systemd service, `update.sh`);
+  6. NIFTY change % in the header (the same as PR #50 here).
+  - GTT was checked and kept for later (its trailing can't do decision 4's rule; not in the sandbox).
+  - **Next (testing, no code):** Dry run on the PC on trading days → Sandbox (sandbox token) → set up the server together (Sat 28 – Sun 29 Nov) and register its static IP in Upstox after market hours → 1-lot live tests from 30 Nov → decide on Fri 11 Dec whether to switch or renew AlgoDelta for a month.
+- *The plan as agreed on 23 Nov (kept for reference; built as above):*
 - **PLANNED: a separate "BEP Upstox" app (Upstox direct + cloud), agreed 23 Nov 2026; start on 24 Nov (market holiday).** This app (AlgoDelta) stays unchanged and in use until BEP Upstox is proven live. **Target: switch before the AlgoDelta subscription ends (joined 15 Nov 2026, paid to about 14 Dec).**
   - **Estimate given (23 Nov):** about a quarter of the code changes (1,500–2,500 lines over 6–8 PRs). Unchanged: BEP Support, ⭐, Pair cross, Replay, Order Management triggers, exit rules, Order Details. Replaced: `order_bridge.py` → a new `upstox_orders.py` (place market / limit / SL, modify, cancel by order ID, exit a position, errors, rate limits). The biggest change is in `engine.py`: the app holds the SL / Target / trail itself instead of one `strategy_order`. `limit_orders.py` gets simpler (match by order ID). Square-off becomes per order. `app.py` Setup: the AlgoDelta section → Upstox order settings. Tokens: roughly 1 to 1.5× the PR #36–#45 session (about 3–6 M processed, mostly cached re-reads), spread over several sessions. Live 1-lot tests take the most time.
   - **Suggested answers (the user agreed to record them; confirm each before coding):**
@@ -344,7 +356,7 @@ Related repo (reference only, do not change): `ArunkumarEkambaram/LTP_Crossing`.
     - AlgoDelta uses its own IP; ask AlgoDelta to confirm that changing the user's Upstox app IP doesn't affect it.
   - **Broker comparison (reference only, 23 Nov; the user has Dhan, Upstox and AngelOne accounts but uses Upstox only):** Dhan's **Super Order** = entry + target + SL + trailing jump in one broker-held order (SL exit as market, no trailing SL-limit); Dhan trading APIs free, data APIs ₹499/month; static IP needed, locked 7 days. Upstox: trading + data APIs free, GTT with entry / target / SL legs and a trailing gap, about ₹20 per order. Not pursued.
   - **Wednesday 25 Nov tests on this app (1 lot):** the 09:15 max SL (AlgoDelta should show a 17-point SL, no trail), the BEP on the Manual Entry form, Target None, and the Stop-limit test moved from 24 Nov.
-- **ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this; **priority raised by NSE Circular 58/2026**, see above):
+- **(Superseded by BEP Upstox above.) ON HOLD: cloud hosting / Upstox direct** (discussed 20 Nov 2026; the user wants the open bugs fixed first, then to come back to this; **priority raised by NSE Circular 58/2026**, see above):
   - **Today's cost:** AlgoDelta ₹400 + AlgoDelta static IP ₹400 + 18% GST ≈ **₹944/month**. Upstox needs a static IP for order APIs.
   - **Three setups compared:**
     - **A (today):** PC → AlgoDelta → Upstox.
