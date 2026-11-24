@@ -214,18 +214,18 @@ class BepMonitor:
 
     def _opening_sl(self, level, now) -> dict:
         """09:15 order SL (PR #41): a CANDLE close below BEP - open_sl_below on open_sl_tf-minute candles, watched
-        by the app (AlgoDelta gets is_sl false, so it holds no SL and cannot trail; the Setup trailing SL, if on,
-        is watched by the app too). Returns {"params", "app_rules"}."""
+        by the app (AlgoDelta holds only the max SL and never trails it); the 09:15 trailing SL (open_trail, its own
+        Setup values) is watched by the app too and can be changed on the placed order in Order Details. Returns {"params", "app_rules"}."""
         cfg = config.AUTO_ORDER.get(self.name, {})
         below = float(cfg.get("open_sl_below", 2) or 0)
         tf = int(cfg.get("open_sl_tf", 5) or 5)
         rule = {"kind": "sl", "type": "CANDLE", "value": round(level - below, 2), "tf": tf, "set_at": "",
                 "custom": False}
         app_rules = {"c_sl": json.dumps(rule)}
-        if cfg.get("trail"):
+        if cfg.get("open_trail", True):           # the 09:15 order's own trail (Setup > 09:15 opening order)
             app_rules["c_trail"] = json.dumps({
-                "trigger": float(cfg.get("trail_trigger", 20)), "gap": float(cfg.get("trail_gap", 20)),
-                "step": float(cfg.get("trail_point") or 1), "set_at": now.strftime("%H:%M:%S"), "high": None,
+                "trigger": float(cfg.get("open_trail_trigger", 20)), "gap": float(cfg.get("open_trail_gap", 19)),
+                "step": float(cfg.get("open_trail_point") or 1), "set_at": now.strftime("%H:%M:%S"), "high": None,
                 "done": ""})
         max_sl = float(cfg.get("open_max_sl", 17) or 0)
         if max_sl > 0:          # PR #47: AlgoDelta holds a POINT SL (entry - max_sl) as a backstop; the app keeps the trail

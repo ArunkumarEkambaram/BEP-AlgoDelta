@@ -1510,17 +1510,20 @@ class Engine:
     @staticmethod
     def trail_level(t, entry):
         """Current level of an app trailing SL: None until the high reaches entry + trigger."""
-        high = t.get("high")
+        high, floor = t.get("high"), t.get("floor")
         if entry is None or high is None or high < entry + t["trigger"]:
-            return None
+            return floor                         # a changed trail keeps the level reached before (never down)
         step = t.get("step") or 1
-        return round(entry + int((high - t["gap"] - entry) // step) * step, 2)
+        level = round(entry + int((high - t["gap"] - entry) // step) * step, 2)
+        return max(level, floor) if floor is not None else level
 
     def set_order_trail(self, order_id, trail) -> bool:
-        """Adds / changes (trail with on=True) or removes an app-watched trailing SL on a placed order (not a limit
-        order, not the 09:15 order). It runs on the live LTP every 2 s; AlgoDelta's own trail (if sent) stays."""
+        """Adds / changes (trail with on=True) or removes an app-watched trailing SL on a placed order. It runs on the
+        live LTP every 2 s; AlgoDelta's own trail (if sent) stays. The 09:15 order (its trail is the app's only):
+        a change keeps the high seen so far (and the current LTP) and the level already reached, so it never
+        moves down."""
         o = next((x for x in self.order_log if x["id"] == order_id), None)
-        if not o or not self.order_rule_editable(o):
+        if not o or not self.order_trail_editable(o):
             return False
         if o.get("mg"):                                  # limit / stop-limit: replaces mg.trail (PR #42)
             m = limit_orders.parse(o["mg"])
@@ -1534,7 +1537,18 @@ class Engine:
             self._rewrite_orders_file()
             self.bump("orders", "watch")
             return True
-        o["c_trail"] = self._trail_json(trail) if trail and trail.get("on") else ""
+        new = self._trail_json(trail) if trail and trail.get("on") else ""
+        if new and self.is_opening(o):           # 09:15 order: keep the high seen so far and the level reached
+            old, t = self.app_trail(o), json.loads(new)
+            ltp = self.option_ltp.get(self._opt_key(o))
+            highs = [h for h in ((old or {}).get("high"), ltp) if h is not None]
+            t["high"] = max(highs) if highs else None
+            if old and not old.get("done"):
+                lvl = self.trail_level(old, trade_tracker._f(o.get("entry")))
+                if lvl is not None:
+                    t["floor"] = lvl
+            new = json.dumps(t)
+        o["c_trail"] = new
         self.log(f"{o['index']} {o['strike']}{o['opt']} order: app trailing SL " + (
             f"set (trigger {trail['trigger']:g}, gap {trail['gap']:g}, point {trail.get('point', 1):g})"
             if o["c_trail"] else "removed") + ".")
@@ -1591,6 +1605,19 @@ class Engine:
                     and not Engine.squared_off(r) and trade_tracker._f(r.get("exit")) is None
                     and (limit_orders.pending(m) or limit_orders.held(m)))
         return (r.get("status") in ("SENT", "DRY RUN") and r.get("kind", "Opening candle") != "Opening candle"
+                and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
+
+    @staticmethod
+    def is_opening(r) -> bool:
+        return r.get("kind", "Opening candle") == "Opening candle" and not r.get("mg")
+
+    @staticmethod
+    def order_trail_editable(r) -> bool:
+        """The trailing SL of a placed order can be set / changed / removed: every order whose SL / Target can be,
+        plus the open 09:15 order (the app holds its trail; AlgoDelta's max SL is never trailed)."""
+        if Engine.order_rule_editable(r):
+            return True
+        return (Engine.is_opening(r) and r.get("status") in ("SENT", "DRY RUN")
                 and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
 
     @staticmethod

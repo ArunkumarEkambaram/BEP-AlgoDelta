@@ -1112,6 +1112,48 @@ def card_rule_box(name, r, kind, locked):
                 ui.label(f"Default {d_val:g} {d_type} (Setup)").classes("text-xs opacity-60")
 
 
+def opening_trail_dialog(r):
+    """Order Details: the open 09:15 order's trailing SL (the only rule that can change on it). The candle SL, the
+    AlgoDelta max SL and the Target stay. A change keeps the high seen so far and never moves the SL down;
+    "Check the stoploss" asks first when the new SL would be at or above the LTP (an exit at once)."""
+    rid = r["id"]
+    t = engine.app_trail(r)
+    cfg = config.AUTO_ORDER.get(r["index"], {})
+    cur = {"on": True, "type": "LTP", "trigger": t["trigger"], "point": t["step"], "gap": t["gap"]} if t else {
+        "on": True, "type": "LTP", "trigger": float(cfg.get("open_trail_trigger", 20)),
+        "point": float(cfg.get("open_trail_point", 1)), "gap": float(cfg.get("open_trail_gap", 19))}
+
+    def save(tr):
+        entry = trade_tracker._f(r.get("entry"))
+        ltp = engine.option_ltp.get(engine._opt_key(r))
+        if tr and tr.get("on") and entry is not None and ltp is not None:
+            high = max([h for h in ((t or {}).get("high"), ltp) if h is not None])
+            test = {"trigger": float(tr["trigger"]), "gap": float(tr["gap"]), "step": float(tr.get("point") or 1),
+                    "high": high}
+            if t and not t.get("done"):
+                old = engine.trail_level(t, entry)
+                if old is not None:
+                    test["floor"] = old
+            lvl = engine.trail_level(test, entry)
+            if lvl is not None and lvl >= ltp:
+                with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 420px"):
+                    ui.label("Check the stoploss").classes("text-lg font-bold text-orange-6")
+                    ui.label(f"With this trail the SL is {lvl:g}, at or above the LTP {ltp:g}: the order would be "
+                             "squared off at once.").classes("text-sm")
+                    with ui.row():
+                        ui.button("Cancel", on_click=dlg.close).props("flat")
+                        ui.button("Set anyway", on_click=lambda: (dlg.close(), engine.set_order_trail(rid, tr))) \
+                            .props("color=orange-8")
+                dlg.open()
+                return True
+        return engine.set_order_trail(rid, tr)
+
+    trail_dialog(r["index"], {}, cur=cur, on_save=save,
+                 note="09:15 order: watched by the app on the live LTP. This replaces its trailing SL; the high seen "
+                      "so far is kept and the SL never moves down. The 5-min candle SL, AlgoDelta's max SL and the "
+                      "Target stay as they are. OFF removes the trail.")
+
+
 def trail_dialog(name, r, cur=None, on_save=None, note=None):
     """Trailing SL popup: ON/OFF, Type, Trigger, Point, Gap. Default: the card's own (before ordering). With
     on_save: a placed order's app-watched trailing SL (cur = its values)."""
@@ -2222,8 +2264,11 @@ def orders_page():
     def open_rules(e):
         rid = e.args
         r = next((o for o in engine.order_log if o["id"] == rid), None)
-        if not r or not engine.order_rule_editable(r):
+        if not r or not engine.order_trail_editable(r):
             ui.notify("This order can no longer be changed.", type="warning")
+            return
+        if not engine.order_rule_editable(r):         # the open 09:15 order: only its trailing SL can change
+            opening_trail_dialog(r)
             return
         cfg = config.AUTO_ORDER.get(r["index"], {})
         with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
@@ -2297,7 +2342,7 @@ def orders_page():
             r["rules_text"] = " \u00b7 ".join(parts) + (f" \u2192 {r['c_done']}" if r.get("c_done") else "")
             r["cx_action"] = ("Retry cancel" if m["state"] == "CANCEL FAILED" else "Cancel order") \
                 if limit_orders.cancellable(m) else ""
-            r["rules_edit"] = engine.order_rule_editable(r)
+            r["rules_edit"] = engine.order_trail_editable(r)
             sq = str(r.get("sq") or "")
             r["sq_action"] = "Retry square off" if sq.startswith("FAILED") and trade_tracker._f(r.get("exit")) is None \
                 else ("Square off" if engine.is_open(r) else "")
@@ -2498,6 +2543,16 @@ def algodelta_card(name):
                     ad_open_second = ui.number("Second side within (seconds)",
                                                value=ad_cfg.get("open_second_side_secs", 60), min=1, step=5) \
                         .classes("flex-1").bind_enabled_from(ad_open_second_on, "value")
+                ad_open_trail = ui.switch("09:15 trailing SL", value=bool(ad_cfg.get("open_trail", True))) \
+                    .tooltip("The 09:15 order's own trail, watched by the app (not the Default order trail). Once "
+                             "the high reaches entry + Trigger, SL = high - Gap in steps of Point, never down. It can "
+                             "be changed on the placed order in Order Details.")
+                with ui.row().classes("w-full gap-2 no-wrap"):
+                    ad_open_t_trig = ui.number("Trigger", value=ad_cfg.get("open_trail_trigger", 20), min=0, step=1).classes("flex-1")
+                    ad_open_t_point = ui.number("Point", value=ad_cfg.get("open_trail_point", 1), min=0, step=1).classes("flex-1")
+                    ad_open_t_gap = ui.number("Gap", value=ad_cfg.get("open_trail_gap", 19), min=0, step=1).classes("flex-1")
+                for w in (ad_open_t_trig, ad_open_t_point, ad_open_t_gap):
+                    w.bind_enabled_from(ad_open_trail, "value")
 
         with ui.row().classes("items-center gap-2"):
             ui.button("Save", icon="save", on_click=lambda: save())
@@ -2577,6 +2632,13 @@ def algodelta_card(name):
         open_max = num(ad_open_max.value)
         if open_max is None or open_max < 0:
             return None, "09:15 max SL must be a number of 0 or more (0 = none)."
+        open_trail = bool(ad_open_trail.value)
+        o_trig, o_point, o_gap = num(ad_open_t_trig.value), num(ad_open_t_point.value), num(ad_open_t_gap.value)
+        if open_trail:
+            if None in (o_trig, o_point, o_gap) or o_trig <= 0 or o_point <= 0 or o_gap <= 0:
+                return None, "09:15 trailing SL: Trigger, Point and Gap must be numbers above 0."
+            if o_gap > o_trig:
+                return None, "09:15 trailing SL: Gap must not be larger than Trigger."
         trail = bool(ad_trail.value)
         t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
         if trail:
@@ -2588,6 +2650,10 @@ def algodelta_card(name):
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
                 "open_max_sl": open_max, "open_second_side": open_second_on,
+                "open_trail": open_trail,
+                "open_trail_trigger": o_trig if o_trig is not None else ad_cfg.get("open_trail_trigger", 20),
+                "open_trail_point": o_point if o_point is not None else ad_cfg.get("open_trail_point", 1),
+                "open_trail_gap": o_gap if o_gap is not None else ad_cfg.get("open_trail_gap", 19),
                 "open_second_side_secs": open_second, "warn_above_bep": warn_bep,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
@@ -2617,8 +2683,10 @@ def algodelta_card(name):
                            f"09:15 order at LTP >= BEP + {nums['open_entry_above']:g} and < BEP + {nums['max_above_bep']}, "
                            f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app)"
                            + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta)" if nums['open_max_sl'] else "")
-                           + (f", second side within {nums['open_second_side_secs']:g} s; "
-                              if nums['open_second_side'] else ", second side window OFF; ")
+                           + (f", second side within {nums['open_second_side_secs']:g} s"
+                              if nums['open_second_side'] else ", second side window OFF")
+                           + (f", trail {nums['open_trail_trigger']:g}/{nums['open_trail_gap']:g} "
+                              f"(point {nums['open_trail_point']:g}, app); " if nums['open_trail'] else ", trail OFF; ")
                            + f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                            f"(live orders need both).")
 
