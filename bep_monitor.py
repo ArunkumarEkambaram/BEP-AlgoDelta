@@ -177,8 +177,11 @@ class BepMonitor:
     def _restrict_second_side(self, day, now, log_fn):
         """Second-side window (testing feature, user 24 Nov): once one side has its 09:15 order (SENT / DRY RUN /
         FAILED; BLOCKED frees the side), the other side may follow only within open_second_side_secs seconds of
-        that order's time. After that it is restricted for the day. 0 = off."""
-        raw = config.AUTO_ORDER.get(self.name, {}).get("open_second_side_secs", 60)
+        that order's time. After that it is restricted for the day. Setup switch open_second_side OFF = no window."""
+        cfg = config.AUTO_ORDER.get(self.name, {})
+        if not cfg.get("open_second_side", True):
+            return
+        raw = cfg.get("open_second_side_secs", 60)
         secs = 60.0 if raw is None or raw == "" else float(raw)
         if secs <= 0:
             return

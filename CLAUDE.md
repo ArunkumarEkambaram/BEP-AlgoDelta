@@ -287,11 +287,11 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Only orders that lock a side start the window (SENT / DRY RUN / FAILED). BLOCKED frees the side, so it doesn't.
    - Both qualifying in the same second or within 60 s → both are placed.
    - Log line: "PE 09:15 order restricted: CE was ordered at 09:15:20, more than 60 s ago". Dashboard 09:15 status: "PE: restricted (CE at 09:15:20)".
-   - Setup "09:15 second side within (seconds, 0 = off)" (saved in settings.json; 0 = the old behaviour).
+   - Setup: a **"09:15 second side window" switch** (ON by default; `open_second_side`) + **"Second side within (seconds)"** (60, > 0, greyed out when OFF; `open_second_side_secs`), both saved in settings.json. OFF = the old behaviour (each side any time 09:15–09:20). (The first version used 0 = off; the user asked for a switch instead.)
    - A restart reads the first order's time back from today's orders file, so the window still applies.
    - Only the automatic 09:15 order is affected: a restricted side does **not** skip the 09:15 ⭐ row (only a real 09:15 order does).
    - **Not ported to BEP_Upstox yet** (user: testing feature; recorded in BEP_Upstox's CLAUDE.md "to port later").
-   - Checked: a simulated tick with CE at 09:15:20 → PE at 09:15:50 placed, PE at 09:16:30 restricted, with 0 placed; the Setup page shows the field.
+   - Checked: a simulated tick with CE at 09:15:20 → PE at 09:15:50 placed, PE at 09:16:30 restricted, with the switch OFF placed; the Setup page shows the field.
 
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
