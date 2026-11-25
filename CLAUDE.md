@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #64 (Manual Entry Stop-limit form check, decision 28); updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #65 (Pair "Auto at 09:15", decision 37); updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -336,6 +336,15 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Alert: toast + notification "NIFTY AUTO ORDER Pair 25800CE / 25800PE @ 200: 25800CE DRY RUN" and Log lines.
    - Checked (simulated ticks, dry run, both apps): no order before 09:15; CE above but not crossed → nothing; CE dips to 199 then 203 → ordered; gap-up row → nothing, normal Pair after 09:20; same option open → skipped; both crossing → the bigger move; switch OFF → nothing; Pair page renders the switch / AUTO chip without errors. BEP_Upstox: 58 unit tests pass.
 
+## Session notes (25 Nov 2026 afternoon / evening, PRs #63–#65 here, #18–#19 in BEP_Upstox; read before continuing)
+- **Merged:** #63 the app-held Target for Strategy orders (decision 36, BEP-AlgoDelta only) · #64 Manual Entry Stop-limit form check (decision 28, also BEP_Upstox #18) · #65 Pair "Auto at 09:15" (decision 37, also BEP_Upstox #19, its decision 13). This notes PR is CLAUDE.md only.
+- **Why #63:** the user raised a ⭐ order's Target from 30 to 100 pts after ⚡; it still exited at +30 because AlgoDelta held the sent target (no modify syntax). An SL change "worked" only because it was raised (tighter than AlgoDelta's). Option 2 chosen: the app holds every Order Management Strategy target (`is_tgt` false). Keep the PC on while those orders are open; the header badge says so.
+- **Explained, nothing built:** a BUY Stop-limit needs its trigger **above** the LTP (it waits for a rise). To buy on a dip below the LTP use **Limit** (waits at the exchange) or **Price** (app-side PENDING ↓, then a market order). #64 now refuses a wrong trigger on the Manual Entry form instead of only at ⚡.
+- **#65 for tomorrow's open (26 Nov):** add the Pair row before 09:15 with "Auto at 09:15" ON, Strategy or Limit (a Stop-limit is usually skipped: its default trigger is the leg's price, already crossed), set the card's Target / SL / Trail first; try it in Dry run. Watch the Log / toasts for "AUTO ORDER Pair … sent" or "NOT placed – …" and the AUTO chip. Not yet run in a real 09:15 open.
+- **Still to test live (1 lot):** the app-held target (AlgoDelta should show **no target** on new Order Management Strategy orders; the app squares off at the target → EXITED · App target), plus the items under "Open / not yet verified".
+- **Pushing:** after 15:30 the PRs were pushed directly; during market hours only when the user says "push it and create the PRs" (the Stop hook's push reminder doesn't override that). The work branch `claude/zen-einstein-n2mc3f` (both repos) was recreated from the default branch for each PR; the user deletes it after the merge.
+- **Still open from earlier:** the 09:15 "LTP > open" question (see the 24–25 Nov notes); the "To port later" items in BEP_Upstox (second-side window, skip the first signal) wait for the user's test results.
+
 ## Session notes (24–25 Nov 2026, PRs #54–#62; read before continuing)
 - **Merged in this session:** #54 09:15 second-side window (switch, 60 s; decision 32) · #56 Setup in bordered sections (decision 33) · #58 the 09:15 order's own trailing SL (decision 34) · #60 09:15 skip the first signal (decision 35) · #55 / #57 / #59 / #61 / #62 CLAUDE.md only. BEP_Upstox: #9 / #15 "To port later" notes, #11 Setup sections, #13 09:15 trailing SL, #10 / #12 / #14 / #16 / #17 CLAUDE.md only.
 - **"Latest merge" line:** update it inside the next feature PR, not in a separate docs PR (user, 25 Nov).
@@ -372,7 +381,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PRs #50 to #53: `claude/dazzling-keller-bxdbcj`; PRs #54 to #62: `claude/kind-knuth-vn2ga9`; the app-held Target PR: `claude/zen-einstein-n2mc3f`; each time the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PRs #50 to #53: `claude/dazzling-keller-bxdbcj`; PRs #54 to #62: `claude/kind-knuth-vn2ga9`; PRs #63 to #66: `claude/zen-einstein-n2mc3f`; each time the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
