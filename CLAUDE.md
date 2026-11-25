@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #63 (the app-held Target, decision 36); updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #64 (Manual Entry Stop-limit form check, decision 28); updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -326,6 +326,15 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Orders placed before this change keep AlgoDelta's target (old behaviour: an app target only adds an exit). Orders sent earlier with Target None count as app-target orders (no AlgoDelta target either).
    - **Not in BEP_Upstox** (its target is already app-held and replaceable).
    - Checked (simulated, dry run): default 30 pts → `is_tgt` false + `c_tgt` 30 POINT, badge 1; changed to 100 → no exit at 357.50, exit at 427.60 "App target"; None → no target, badge 0; card CANDLE target → `c_tgt` CANDLE; Manual Entry and Order Details pages render without errors.
+
+37. **Pair "Auto at 09:15" (user, 25 Nov: all suggested; BOTH apps).** A Pair row can place its order by itself at the open, next to the automatic 09:15 BEP order.
+   - **Switch** "Auto at 09:15" on the Pair Add form and on a WAITING Pair card (default OFF; `auto_open`, `CommonWatch.set_auto`, `Engine.set_watch_auto`). Never on BEP cross rows.
+   - **Rule (09:15:00–09:20:00, `config.PAIR_AUTO_FROM` / `PAIR_AUTO_TO`, live LTP every 2 s, `CommonWatch.live_step`):** the first leg whose LTP **crosses above** its price is ordered: it must be at or below its price at some point from 09:15 (`legs[o].auto_below`), then above. No opponent check, no candle close. A leg that opens above and never comes down doesn't count. Both in the same check → the one more points above. `trig_how` = "auto"; card chip **AUTO hh:mm:ss**; status "AUTO: CE LTP crossed above 200 at 09:15:06".
+   - During the window the row's normal triggers (candle close / live LTP with the opponent rule) are off. **No cross by 09:20 → a normal Pair row** (alert + ⚡, its own Trigger on / Timeframe).
+   - **Order (`Engine.auto_place`):** the row's Order type (Strategy market / Limit / Stop-limit / Entry Price → armed) and its own Target / SL / Trail, else the Setup defaults. Then a normal ordered Pair card (SL / Target / Trail, editable, Square off, opponent exit).
+   - **No popups:** the ⚡ warnings (SL at / above the LTP, Target None + trail OFF) are only logged. **Skipped** (alert + Log, card stays TRIGGERED for ⚡) when the same option already has an open order or an entry sent but not filled (e.g. the 09:15 order), or a Stop-limit trigger is already at / below the LTP. Pause algo, the daily limit and max loss per day block it as usual (BLOCKED).
+   - Alert: toast + notification "NIFTY AUTO ORDER Pair 25800CE / 25800PE @ 200: 25800CE DRY RUN" and Log lines.
+   - Checked (simulated ticks, dry run, both apps): no order before 09:15; CE above but not crossed → nothing; CE dips to 199 then 203 → ordered; gap-up row → nothing, normal Pair after 09:20; same option open → skipped; both crossing → the bigger move; switch OFF → nothing; Pair page renders the switch / AUTO chip without errors. BEP_Upstox: 58 unit tests pass.
 
 ## Session notes (24–25 Nov 2026, PRs #54–#62; read before continuing)
 - **Merged in this session:** #54 09:15 second-side window (switch, 60 s; decision 32) · #56 Setup in bordered sections (decision 33) · #58 the 09:15 order's own trailing SL (decision 34) · #60 09:15 skip the first signal (decision 35) · #55 / #57 / #59 / #61 / #62 CLAUDE.md only. BEP_Upstox: #9 / #15 "To port later" notes, #11 Setup sections, #13 09:15 trailing SL, #10 / #12 / #14 / #16 / #17 CLAUDE.md only.
