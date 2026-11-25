@@ -304,6 +304,17 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - **"Check the stoploss":** when the new SL would be at or above the LTP (an exit at once), the popup asks first (Set anyway / Cancel).
    - Checked: the signal carries the 09:15 trail (and none when OFF); the engine path above; Setup shows the fields; Order Details changed 20/19 → 30/25 with no page errors.
 
+35. **09:15: skip the first signal (TESTING feature, user 25 Nov: option A, all suggested; BEP-AlgoDelta only).** Each side's (CE / PE) **1st** 09:15 signal is not ordered; the order goes on the **2nd** (`open_skip_first`, `BepMonitor._first_skip`, in `opening_tick`).
+   - **2nd signal:** a strike of that side whose LTP fell back **below its entry level** (BEP + `open_entry_above`) after the 1st signal and then meets **all** the rules again (touch, LTP > open, ≥ BEP + 2, < BEP + 15). Per side, either strike (the nearer one wins as before); a strike that stayed above since the 1st signal doesn't count.
+   - No 2nd signal by 09:20 → no 09:15 order for that side that day.
+   - Log: "CE 26000 1st signal skipped (LTP 153.00 >= BEP 150.00 + 2); waiting for the 2nd …". Dashboard: "CE: 1st signal skipped at 09:15:20 (26000), waiting for the 2nd" (after 09:20: "no 2nd signal").
+   - Setup › 09:15 opening order: **"09:15: skip the first signal"** switch, **ON by default**, saved. OFF = order on the 1st signal.
+   - The 60 s second-side window (decision 32) starts from the first order actually placed, not from a skipped signal.
+   - The skip state is in memory: a restart between the 1st and 2nd signal starts over (the next signal counts as a 1st).
+   - **Not ported to BEP_Upstox** (recorded there under "To port later").
+   - Checked (simulated ticks): skip → dip → 2nd ordered; the other strike staying above isn't a 2nd signal; no dip → no order; switch OFF → 1st ordered; with the 60 s window: PE 2nd 50 s after the CE order placed, 70 s after restricted. Setup shows the switch and saves.
+   - **Discussed, kept for later (user, 25 Nov):** the "LTP > open" rule when the candle opens above the BEP (e.g. BEP 150, open 165: no price meets both LTP > 165 and < BEP + 15, so no order). Options offered: a Setup switch for "LTP > open", or a higher max above BEP.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).

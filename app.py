@@ -2543,6 +2543,11 @@ def algodelta_card(name):
                     ad_open_second = ui.number("Second side within (seconds)",
                                                value=ad_cfg.get("open_second_side_secs", 60), min=1, step=5) \
                         .classes("flex-1").bind_enabled_from(ad_open_second_on, "value")
+                ad_open_skip = ui.switch("09:15: skip the first signal", value=bool(ad_cfg.get("open_skip_first", True))) \
+                    .tooltip("Testing: each side's 1st 09:15 signal is not ordered. The order goes on the 2nd: a strike "
+                             "whose LTP fell back below BEP + entry after the 1st and meets all the rules again before "
+                             "09:20 (either strike of that side). No 2nd signal = no 09:15 order for that side. OFF = "
+                             "order on the 1st signal.")
                 ad_open_trail = ui.switch("09:15 trailing SL", value=bool(ad_cfg.get("open_trail", True))) \
                     .tooltip("The 09:15 order's own trail, watched by the app (not the Default order trail). Once "
                              "the high reaches entry + Trigger, SL = high - Gap in steps of Point, never down. It can "
@@ -2649,7 +2654,7 @@ def algodelta_card(name):
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
                 "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
                 "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
-                "open_max_sl": open_max, "open_second_side": open_second_on,
+                "open_max_sl": open_max, "open_second_side": open_second_on, "open_skip_first": bool(ad_open_skip.value),
                 "open_trail": open_trail,
                 "open_trail_trigger": o_trig if o_trig is not None else ad_cfg.get("open_trail_trigger", 20),
                 "open_trail_point": o_point if o_point is not None else ad_cfg.get("open_trail_point", 1),
@@ -2685,6 +2690,7 @@ def algodelta_card(name):
                            + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta)" if nums['open_max_sl'] else "")
                            + (f", second side within {nums['open_second_side_secs']:g} s"
                               if nums['open_second_side'] else ", second side window OFF")
+                           + (", 1st signal skipped" if nums['open_skip_first'] else "")
                            + (f", trail {nums['open_trail_trigger']:g}/{nums['open_trail_gap']:g} "
                               f"(point {nums['open_trail_point']:g}, app); " if nums['open_trail'] else ", trail OFF; ")
                            + f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
