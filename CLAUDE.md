@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #60, 09:15 skip the first signal (testing); updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #62, CLAUDE.md hand-off of the 25 Nov session (last feature: PR #60, 09:15 skip the first signal); updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -315,6 +315,17 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Checked (simulated ticks): skip → dip → 2nd ordered; the other strike staying above isn't a 2nd signal; no dip → no order; switch OFF → 1st ordered; with the 60 s window: PE 2nd 50 s after the CE order placed, 70 s after restricted. Setup shows the switch and saves.
    - **Discussed, kept for later (user, 25 Nov):** the "LTP > open" rule when the candle opens above the BEP (e.g. BEP 150, open 165: no price meets both LTP > 165 and < BEP + 15, so no order). Options offered: a Setup switch for "LTP > open", or a higher max above BEP.
 
+## Session notes (24–25 Nov 2026, PRs #54–#62; read before continuing)
+- **Merged in this session:** #54 09:15 second-side window (switch, 60 s; decision 32) · #56 Setup in bordered sections (decision 33) · #58 the 09:15 order's own trailing SL (decision 34) · #60 09:15 skip the first signal (decision 35) · #55 / #57 / #59 / #61 / #62 CLAUDE.md only. BEP_Upstox: #9 / #15 "To port later" notes, #11 Setup sections, #13 09:15 trailing SL, #10 / #12 / #14 / #16 / #17 CLAUDE.md only.
+- **"Latest merge" line:** update it inside the next feature PR, not in a separate docs PR (user, 25 Nov).
+- **Pushing during market hours:** the user allowed it case by case with "push it and create the PRs"; otherwise keep the commits local until after 15:30 (a Stop hook asks to push: the user's rule wins).
+- **New defaults the user should know at the next 09:15 (all ON, Setup › 09:15 opening order):** skip the first signal, 60 s second-side window, 09:15 trailing SL 20 / 1 / 19. To test them one at a time, switch the others off. Watch the Log / Dashboard lines "1st signal skipped … waiting for the 2nd" and "restricted".
+- **Open question, kept for later (user: "remain these things later today"):** "LTP > open" in the 09:15 rule. With BEP 150 and the open at 165 nothing can be ordered (LTP > 165 means ≥ BEP + 15, skipped). Offered: a Setup switch for "LTP > open" (enter at BEP + 2 while the candle is still red) or a higher max above BEP. Ask before building.
+- **Answered, nothing built:**
+  - **Trailing SL on ordered Strategy cards:** a trail ON at ⚡ is sent to AlgoDelta and can't be removed or changed afterwards (no modify syntax); the card's Remove only removes an app trail. The user will switch the trail OFF before ⚡ when they may want to change it. Offered, declined for now: label "AlgoDelta trail (can't change)" on those cards; an app-held trail switch for Strategy cards. In BEP_Upstox every trail is app-held and can be changed / removed while the order is open.
+  - **Orders per second:** the 10 OPS line (SEBI retail algo rules, exchange threshold) counts **order messages** (new, and as understood modify / cancel), not lots; one 10-lot order = 1. The apps send well under 1 per second; bursts only on Square off all / 15:15 / several trails at once (~5 with the daily limit). No app-side rate limiter; an 8-per-second throttle was offered, not needed now. Confirm with Upstox (already on the question list).
+  - **AlgoDelta paper trade on 25 Nov (25650CE, entry 142.75, exit 259.70, ₹7,601.75):** an entry-at-price card armed at 09:14 filled on the previous close (the stale pre-open LTP); the CE opened at 226.10, so a real order would not have filled. This app checks PENDING / limit / trail only while the market is open, so it can't take such a fill. Tip for the user: arm AlgoDelta price entries after 09:15.
+
 ## AlgoDelta JSON used
 - Entry `strategy_order`: the template in `config._STRATEGY_ORDER`, with placeholders `{symbol}` (e.g. NIFTY23NOV2625400CE), `{qty}`, `{tgt}`, `{sl}`, `{is_trail}`, `{trail_*}`, `{exit_on_opposite}` and others.
 - Limit entry: `{"type": "limit_order", "script_type": "CE", "script": "NIFTY23NOV2625200CE", "product": "INTRADAY", "quantity": 1, "price": 100, "transaction_type": "BUY"}` (quantity = lots).
@@ -340,7 +351,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PR #50 and later: `claude/dazzling-keller-bxdbcj`, the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PRs #50 to #53: `claude/dazzling-keller-bxdbcj`; PRs #54 to #62: `claude/kind-knuth-vn2ga9`; each time the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).
