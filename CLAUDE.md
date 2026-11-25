@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #62, CLAUDE.md hand-off of the 25 Nov session (last feature: PR #60, 09:15 skip the first signal); updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = the app-held Target PR (decision 36, after PR #62, the CLAUDE.md hand-off of the 25 Nov session); updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -315,6 +315,17 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
    - Checked (simulated ticks): skip → dip → 2nd ordered; the other strike staying above isn't a 2nd signal; no dip → no order; switch OFF → 1st ordered; with the 60 s window: PE 2nd 50 s after the CE order placed, 70 s after restricted. Setup shows the switch and saves.
    - **Discussed, kept for later (user, 25 Nov):** the "LTP > open" rule when the candle opens above the BEP (e.g. BEP 150, open 165: no price meets both LTP > 165 and < BEP + 15, so no order). Options offered: a Setup switch for "LTP > open", or a higher max above BEP.
 
+36. **Target held by the app for Order Management Strategy orders (user, 25 Nov: option 2, all suggested; BEP-AlgoDelta only).**
+   - **Why:** a ⭐ order (25800CE, entry 327.45, default Target 30 POINT) was changed to Target 100 after ⚡, but exited at +30 (357.45): AlgoDelta held the 30-pt target it was sent (no modify syntax) and the app rule was only an extra exit. An SL change worked only because it was raised (tighter than AlgoDelta's).
+   - **Now:** every Strategy order from Same strike, Pair, ⭐ and Manual (Market / Price, PENDING entries too) is sent with **`is_tgt` false**. The target (the card's own, else the Setup default for its type) goes on the order as `c_tgt` at ⚡ (`Engine.place_watch_order`). The SL and trailing SL still go to AlgoDelta as before. **The 09:15 order is unchanged** (Setup target held by AlgoDelta).
+   - **Watching:** LTP / POINT targets on the live LTP every 2 s (`Engine.check_app_targets`, after `check_app_trails`; POINT = entry + value, `app_target_level`); hit → `squareoff_position` once, `c_tgt.done`, card chip **EXITED · App target** (`Engine.exit_label`, also "App trailing SL" / "Manual" / the dry-run exit reason). CANDLE targets stay on candle closes (trade_tracker). Dry run: the same (exit = fresh LTP via the square-off); the 1-min candle simulation no longer has an AlgoDelta target (`base_rules`, is_tgt false), whichever of the two hits first.
+   - **Editing after placing** (card Target box, Order Details popup): a new Target **replaces** it (raise, lower, CANDLE); **None** is offered and, like ×, means no target at all (`set_order_custom`, `Engine.app_target`). Card text "100 pts · at 427.45 · app" / "None · no target (trail / SL only)"; Order Details "Tgt 100 pts (app)" / "Tgt none (app)".
+   - Header badge: **"APP-MANAGED SL / TARGET ACTIVE (n) - keep this PC on"** also counts open strategy orders with an app target (`limit_active`).
+   - **Risks accepted:** with the PC / app off nothing exits at the target (the SL stays with AlgoDelta); `squareoff_position` closes the whole position on that option (other open orders on it too).
+   - Orders placed before this change keep AlgoDelta's target (old behaviour: an app target only adds an exit). Orders sent earlier with Target None count as app-target orders (no AlgoDelta target either).
+   - **Not in BEP_Upstox** (its target is already app-held and replaceable).
+   - Checked (simulated, dry run): default 30 pts → `is_tgt` false + `c_tgt` 30 POINT, badge 1; changed to 100 → no exit at 357.50, exit at 427.60 "App target"; None → no target, badge 0; card CANDLE target → `c_tgt` CANDLE; Manual Entry and Order Details pages render without errors.
+
 ## Session notes (24–25 Nov 2026, PRs #54–#62; read before continuing)
 - **Merged in this session:** #54 09:15 second-side window (switch, 60 s; decision 32) · #56 Setup in bordered sections (decision 33) · #58 the 09:15 order's own trailing SL (decision 34) · #60 09:15 skip the first signal (decision 35) · #55 / #57 / #59 / #61 / #62 CLAUDE.md only. BEP_Upstox: #9 / #15 "To port later" notes, #11 Setup sections, #13 09:15 trailing SL, #10 / #12 / #14 / #16 / #17 CLAUDE.md only.
 - **"Latest merge" line:** update it inside the next feature PR, not in a separate docs PR (user, 25 Nov).
@@ -351,7 +362,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
   - per-card trailing as sent.
 - **Waiting on the user:**
   - their own static IP (from their ISP, or an AWS Elastic IP / Azure static IP if hosted in the cloud) (for "Upstox direct" limit, modify, cancel and per-order square-off).
-- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PRs #50 to #53: `claude/dazzling-keller-bxdbcj`; PRs #54 to #62: `claude/kind-knuth-vn2ga9`; each time the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
+- **Branches:** the merged feature branches are deleted. Each cloud session has its own work branch (PRs #20 to #31: `claude/amazing-allen-klxor4`; PRs #32 to #49: `claude/affectionate-albattani-a69mce`; PR #40: `claude/manual-stoplimit-default`; PR #43: `claude/bep-distance-warning`; PRs #50 to #53: `claude/dazzling-keller-bxdbcj`; PRs #54 to #62: `claude/kind-knuth-vn2ga9`; the app-held Target PR: `claude/zen-einstein-n2mc3f`; each time the same name in BEP_Upstox), recreated from `main` for each PR. The user deletes it after a merge.
 - **NSE Circular 58/2026 (NSE/INSP/77559, 20 Nov 2026, effective immediately): Tech-savvy Retail Investors / Static IP.** The user shared it on 21 Nov 2026.
   - **What it says:**
     - Static IPs are **only** for "Tech-savvy Retail Investors" (retail clients who **develop their own algos using programming knowledge**, SEBI circular of 4 Feb 2025).

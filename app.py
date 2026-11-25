@@ -225,7 +225,7 @@ def root():
             mode_badge.set_text("DRY RUN" if config.AUTO_ORDER_DRY_RUN else "LIVE")
             mode_badge.props("color=" + ("orange-8" if config.AUTO_ORDER_DRY_RUN else "red"))
         la = engine.limit_active()
-        app_sl_badge.set_text(" · ".join(([f"APP-MANAGED SL ACTIVE ({la['held']}) - keep this PC on"] if la["held"] else [])
+        app_sl_badge.set_text(" · ".join(([f"APP-MANAGED SL / TARGET ACTIVE ({la['held']}) - keep this PC on"] if la["held"] else [])
                                          + ([f"LIMIT OPEN ({la['waiting']})"] if la["waiting"] else [])))
         app_sl_badge.set_visibility(bool(la["held"] or la["waiting"]))
         ml = engine.max_loss_state(names[0] if names else None)
@@ -952,7 +952,8 @@ def card_state(r, order=None) -> str:
         if exited:
             if m and m.get("exit"):
                 return f"EXITED · {limit_orders.exit_label(m)}"
-            return "EXITED · Manual" if engine.squared_off(order or {}) else "EXITED"
+            why = engine.exit_label(order) or str((order or {}).get("exit_reason") or "")
+            return f"EXITED · {why}" if why else "EXITED"
         if sq.startswith("SENT"):
             return "SQUARING OFF"
         if sq.startswith("FAILED"):
@@ -1039,6 +1040,7 @@ def card_rule_box(name, r, kind, locked):
         if prm.get(kind) is not None:
             d_type, d_val = prm[kind + "_type"], prm[kind]
     sent_none = bool(order) and not m and kind == "tgt" and exit_rules.is_none(rule)   # PR #48: sent with no target
+    app_tgt = bool(order) and not m and kind == "tgt" and engine.app_target(order)     # target held by the app
 
     def on_set(new_rule):
         if engine.watches[name].set_custom(r["id"], kind, new_rule):
@@ -1060,16 +1062,23 @@ def card_rule_box(name, r, kind, locked):
                 if o_rule:
                     ui.icon("candlestick_chart" if o_rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
                 v = ui.label(f"{o_rule['value']:.2f}" if o_rule else
-                             ("--" if m else ("None" if sent_none else f"{d_val:g} {d_type}"))) \
+                             ("--" if m else ("None" if sent_none or app_tgt else f"{d_val:g} {d_type}"))) \
                     .classes("text-lg font-bold")
                 if editable:
                     v.classes("cursor-pointer")
-                    v.on("click", lambda: rule_dialog(f"{what} (app-watched)", kind, o_rule, on_order_set,
-                                                      allow_none=bool(m)))
+                    v.on("click", lambda: rule_dialog(f"{what} (app-held)" if app_tgt else f"{what} (app-watched)",
+                                                      kind, o_rule, on_order_set, allow_none=bool(m) or app_tgt))
                     if o_rule:
                         ui.button(icon="close", on_click=lambda: on_order_set(None)) \
                             .props("flat dense round size=xs color=red") \
-                            .tooltip(f"Remove the {what} (no {what} left)" if m else "Remove the app rule")
+                            .tooltip(f"Remove the {what} (no {what} left)" if m or app_tgt else "Remove the app rule")
+            if app_tgt:                               # strategy order: the app holds its only target
+                lvl = engine.app_target_level(order)
+                sub = (exit_rules.describe(o_rule) + (f" \u00b7 at {lvl:g}" if lvl is not None and o_rule["type"] == "POINT"
+                                                       else "") if o_rule
+                       else "no target (trail / SL only)" + (" \u00b7 click to set" if editable else ""))
+                ui.label(sub + " \u00b7 app").classes("text-xs " + ("text-amber-5" if o_rule else "opacity-60"))
+                return
             if m:                                     # limit / stop-limit: the app holds the only rule
                 sub = exit_rules.describe(o_rule) if o_rule else ("none" + (" \u00b7 click to set" if editable else ""))
                 if kind == "sl":
@@ -2101,8 +2110,8 @@ def star_page():
 def manual_page():
     om_header("Manual Entry", "Pick a strike and place a BUY yourself - no trigger condition. Market = order at "
               "⚡ / Add & place. Price = the app waits until the LTP reaches your price (either way: ↓ a dip or "
-              "↑ a breakout), then sends a market order; Target / Stoploss / Trailing go with the AlgoDelta "
-              "strategy order. Limit = buy at this price OR CHEAPER (AlgoDelta limit order): it waits only if the "
+              "↑ a breakout), then sends a market order; Stoploss / Trailing go with the AlgoDelta "
+              "strategy order, the Target is held by this app (change it any time while open; keep the PC on). Limit = buy at this price OR CHEAPER (AlgoDelta limit order): it waits only if the "
               "price is below the LTP; above the LTP it fills at once. Stop-limit = buy when the price RISES to the "
               "trigger (AlgoDelta sl_order, waits at the exchange), then a limit at the limit price. For Limit and "
               "Stop-limit the Target / Stoploss / Trailing are watched by THIS APP on the live LTP (square-off when "
@@ -2274,9 +2283,13 @@ def orders_page():
         with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
             ui.label(f"{r['index']} {r['strike']}{r['opt']} \u2014 SL / Target").classes("text-lg font-bold")
             lim = bool(r.get("mg"))
+            app_tgt = engine.app_target(r)
             ui.label("Watched by the app; when hit, the position is squared off (live) or the exit is recorded "
                      "(dry run). " + ("Limit / stop-limit order: a change REPLACES its SL / Target (AlgoDelta holds "
                                       "none)." if lim else
+                                      "The Target is held by the app: a change REPLACES it (None = no target). "
+                                      "AlgoDelta's original SL stays active too - whichever hits first exits."
+                                      if app_tgt else
                                       "AlgoDelta's original SL / Target stay active too - whichever hits first exits.")
                      ).classes("text-xs opacity-70")
 
@@ -2290,8 +2303,8 @@ def orders_page():
                 else (lambda k: r.get("c_" + k))
             rule_toggle("SL", "sl", cur_rule("sl"), "none" if lim else f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}",
                         False, setter("sl"))
-            rule_toggle("Target", "tgt", cur_rule("tgt"), "none" if lim else "Common (as sent)", False, setter("tgt"),
-                        allow_none=lim)
+            rule_toggle("Target", "tgt", cur_rule("tgt"), "none" if lim or app_tgt else "Common (as sent)", False,
+                        setter("tgt"), allow_none=lim or app_tgt)
             t = engine.order_trail(r)
 
             def open_trail():
@@ -2325,8 +2338,12 @@ def orders_page():
 
     def render():
         for r in engine.order_log:
+            app_tgt = engine.app_target(r)
             parts = [f"{'SL' if k == 'sl' else 'Tgt'} {exit_rules.describe(exit_rules.parse(r.get('c_' + k)))}"
+                     + (" (app)" if k == "tgt" and app_tgt else "")
                      for k in ("sl", "tgt") if exit_rules.parse(r.get("c_" + k))]
+            if app_tgt and not engine.order_rule(r, "tgt"):
+                parts.append("Tgt none (app)")
             m = limit_orders.parse(r.get("mg"))
             if m:                                       # limit order: state + the rules the app watches
                 parts = [(limit_orders.state_text(m) or f"FILLED {m['filled']} @ {m['fill']:.2f}"),
