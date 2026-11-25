@@ -56,6 +56,9 @@ class BepMonitor:
         self.plan = None             # 09:15 opening plan, prepared before the open (see prepare_opening)
         self._plan_skip_logged = None
         self._far_logged = set()     # (date, strike, opt) already logged as "too far above BEP"
+        # 09:15 "skip the first signal" (testing): (date, opt) -> {"time", "strike", "ltp", "dipped": set of strikes
+        # whose LTP fell back below their entry level after the 1st signal}
+        self._first_skip = {}
         self.new_orders = []         # signals waiting to be sent
         self.replay = False          # True = a past day rebuilt from historical candles: no alerts, no quotes
         self.bep_fn = None
@@ -166,10 +169,15 @@ class BepMonitor:
         parts = []
         for opt in ("CE", "PE"):
             lk = self.side_lock.get((day, opt))
+            sk = self._first_skip.get((day, opt))
             if lk and lk.get("status") == "restricted":
                 parts.append(f"{opt}: restricted ({lk['by']} at {lk['by_time']})")
             elif lk:
                 parts.append(f"{opt}: ordered {lk['strike']} at {lk['time']} ({names.get(lk['status'], lk['status'])})")
+            elif sk:
+                late = datetime.now(market_utils.IST).time() >= dtime(9, 15 + CANDLE_MINUTES)
+                parts.append(f"{opt}: 1st signal skipped at {sk['time']} ({sk['strike']}), "
+                             + ("no 2nd signal" if late else "waiting for the 2nd"))
             else:
                 parts.append(f"{opt}: open")
         return "09:15 orders today \u2014 " + " \u00b7 ".join(parts)
@@ -283,6 +291,8 @@ class BepMonitor:
         (= first candle low) touched BEP and LTP is above the open and above BEP, but less than max_above_bep
         points above BEP. At most ONE CE and ONE PE per day (closest to the pre-open price if both qualify).
         Once one side is ordered, the other side only within open_second_side_secs (60 s; _restrict_second_side).
+        open_skip_first (testing): a side's 1st signal is skipped; the order goes on its 2nd signal from a strike that
+        fell back below its entry level after the 1st (per side, either strike), else no order that day.
         No plan prepared before 09:15 -> no opening order today."""
         if not (SESSION_FIRST_CANDLE <= now.time() < dtime(9, 15 + CANDLE_MINUTES)) or not market_utils.is_trading_day(now):
             return
@@ -320,8 +330,14 @@ class BepMonitor:
             level = leg["bep"]
             above = float(config.AUTO_ORDER.get(self.name, {}).get("open_entry_above", 2) or 0)
             entry = level + above                            # PR #41: enter at BEP + 2 (0 = just above BEP)
-            if not (seen_low <= level + support_logic.TOL and ltp > o and (ltp >= entry if above else ltp > level)):
+            at_entry = ltp >= entry if above else ltp > level
+            skip = self._first_skip.get((day, opt))
+            if skip is not None and not at_entry:
+                skip["dipped"].add(strike)                   # back below the entry level: may signal again
+            if not (seen_low <= level + support_logic.TOL and ltp > o and at_entry):
                 continue
+            if skip is not None and strike not in skip["dipped"]:
+                continue                                     # still the 1st move up: wait for a dip and a 2nd signal
             if max_above > 0 and ltp - level >= max_above:
                 if key not in self._far_logged:
                     self._far_logged.add(key)
@@ -330,10 +346,21 @@ class BepMonitor:
                 continue
             candidates[opt].append((abs(strike - plan["ref"]), strike, level, ltp))
 
+        skip_first = bool(config.AUTO_ORDER.get(self.name, {}).get("open_skip_first", True))
         for opt, cands in candidates.items():
             if not cands:
                 continue
             _dist, strike, level, ltp = min(cands)
+            if skip_first and (day, opt) not in self._first_skip:
+                # testing feature: the 1st signal of a side is NOT ordered; the side waits for a strike to fall back
+                # below its entry level (BEP + open_entry_above) and qualify again (all the rules) before 09:20
+                self._first_skip[(day, opt)] = {"time": now.strftime("%H:%M:%S"), "strike": strike, "ltp": ltp,
+                                                "dipped": set()}
+                above = float(config.AUTO_ORDER.get(self.name, {}).get("open_entry_above", 2) or 0)
+                log_fn(f"BEP {self.name} opening candle: {opt} {strike} 1st signal skipped (LTP {ltp:.2f} >= BEP "
+                       f"{level:.2f} + {above:g}); waiting for the 2nd (a dip below the entry level, then the rules "
+                       f"again, before 09:20)")
+                continue
             if self._queue_order(opt, strike, level, ltp, now):
                 others = ", ".join(str(c[1]) for c in sorted(cands) if c[1] != strike)
                 cfg = config.AUTO_ORDER.get(self.name, {})
