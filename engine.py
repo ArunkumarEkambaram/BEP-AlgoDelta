@@ -750,6 +750,7 @@ class Engine:
             await self.check_pending_entries()
             await self.check_limits()
             await self.check_app_trails()
+            await self.check_app_targets()
 
     async def place_watch_order(self, name, row_id, fill_ltp=None, entry_note=""):
         """Sends the card's order now (market). Signal LTP = the live LTP at the click / at the price hit (dry-run
@@ -775,18 +776,26 @@ class Engine:
         params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r),
                              "trail": tr["on"], "trail_type": tr["type"], "trail_trigger": tr["trigger"],
                              "trail_point": tr["point"], "trail_gap": tr["gap"]}, {}
-        for k in ("sl", "tgt"):                       # the row's own SL / Target (popup in Order Management)
-            rule = exit_rules.parse(r.get("c_" + k))
-            if not rule:
-                continue
-            if exit_rules.is_none(rule):              # Target None (PR #48): AlgoDelta holds no target
-                params["is_" + k] = False
-                continue
-            if rule["type"] == "CANDLE":              # watched by the app -> AlgoDelta must not hold its own
-                params["is_" + k] = False
-                app_rules["c_" + k] = json.dumps({**rule, "set_at": ""})
-            else:                                     # LTP / POINT -> sent to AlgoDelta as this order's value
-                params[k], params[k + "_type"] = rule["value"], rule["type"]
+        sl_own = exit_rules.parse(r.get("c_sl"))      # the row's own SL (popup in Order Management)
+        if sl_own and sl_own["type"] == "CANDLE":     # watched by the app -> AlgoDelta must not hold its own
+            params["is_sl"] = False
+            app_rules["c_sl"] = json.dumps({**sl_own, "set_at": ""})
+        elif sl_own:                                  # LTP / POINT -> sent to AlgoDelta as this order's value
+            params["sl"], params["sl_type"] = sl_own["value"], sl_own["type"]
+        # Target: always held by the APP (AlgoDelta gets is_tgt false), so it can be raised / lowered / removed after
+        # placing. The card's own Target, else the Setup default for its type; None = no target at all.
+        params["is_tgt"] = False
+        tgt_rule = exit_rules.parse(r.get("c_tgt"))
+        if tgt_rule is None:
+            try:
+                tgt_rule = exit_rules.make_rule("tgt", tgt_type if tgt_type in ("LTP", "POINT") else "POINT",
+                                                float(tgt), custom=False)
+            except (TypeError, ValueError):
+                tgt_rule = None
+        if tgt_rule and not exit_rules.is_none(tgt_rule):
+            app_rules["c_tgt"] = json.dumps({**tgt_rule, "set_at": ""})
+            if tgt_rule["type"] != "CANDLE":           # kept in the payload for the record (is_tgt false)
+                params["tgt"], params["tgt_type"] = tgt_rule["value"], tgt_rule["type"]
         sl_rule = exit_rules.parse(r.get("c_sl"))
         if sl_rule and sl_rule["type"] == "CANDLE" and tr["on"]:   # AlgoDelta cannot trail (is_sl false): the app does
             app_rules["c_trail"] = self._trail_json(tr)
@@ -1268,6 +1277,8 @@ class Engine:
                 waiting += 1
             elif m and self.is_open(o):
                 held += 1
+            elif not m and self.is_open(o) and self.app_target(o) and self.order_rule(o, "tgt"):
+                held += 1                             # strategy order with an app-held target
         return {"waiting": waiting, "held": held}
 
     async def place_limit_order(self, name, row_id):
@@ -1608,6 +1619,55 @@ class Engine:
                 and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
 
     @staticmethod
+    def app_target(o) -> bool:
+        """Strategy order whose Target is held by the app (sent with is_tgt false): every Order Management order
+        since the app-held target change, and older ones sent with Target None. An edit REPLACES its target."""
+        return (not o.get("mg") and not Engine.is_opening(o) and bool(o.get("payload"))
+                and trade_tracker._params(o).get("is_tgt") is False)
+
+    @staticmethod
+    def app_target_level(o):
+        """Price level of an order's app LTP / POINT target (None for CANDLE / None / no target / no entry yet)."""
+        rule = exit_rules.parse(o.get("c_tgt"))
+        if not rule or rule.get("type") not in ("LTP", "POINT"):
+            return None
+        if rule["type"] == "LTP":
+            return float(rule["value"])
+        entry = trade_tracker._f(o.get("entry"))
+        return round(entry + float(rule["value"]), 2) if entry is not None else None
+
+    async def check_app_targets(self):
+        """Every OPTION_LTP_SECONDS in market hours: LTP / POINT targets held by the app (strategy orders, also app
+        rules set after placing) on the live LTP. LTP at or above the level -> square-off once ("App target").
+        CANDLE targets stay on candle closes (trade_tracker)."""
+        for o in list(self.order_log):
+            if o.get("mg") or not self.is_open(o):
+                continue
+            rule = exit_rules.parse(o.get("c_tgt"))
+            if not rule or rule.get("done"):
+                continue
+            level = self.app_target_level(o)
+            ltp = self.option_ltp.get(self._opt_key(o))
+            if level is None or ltp is None or ltp < level:
+                continue
+            rule["done"] = f"{_stamp()} at {level:g}"
+            o["c_tgt"] = json.dumps(rule)
+            self.log(f"{o['index']} {o['strike']}{o['opt']}: app target hit (LTP {ltp}, level {level:g}) "
+                     "- squaring off.")
+            await self.square_off(o["id"], "App target")
+
+    @staticmethod
+    def exit_label(o) -> str:
+        """Why a strategy order was closed by the app / you, for the card chip ("" if not known)."""
+        rule = exit_rules.parse((o or {}).get("c_tgt"))
+        if rule and rule.get("done"):
+            return "App target"
+        t = Engine.app_trail(o or {})
+        if t and t.get("done"):
+            return "App trailing SL"
+        return "Manual" if Engine.squared_off(o or {}) else ""
+
+    @staticmethod
     def is_opening(r) -> bool:
         return r.get("kind", "Opening candle") == "Opening candle" and not r.get("mg")
 
@@ -1652,8 +1712,9 @@ class Engine:
 
     def set_order_custom(self, row_id, kind, rule):
         """Sets (rule) or clears (None) an order's own SL / Target after it was placed. Watched by the app.
-        Strategy order: AlgoDelta's original SL / Target stay active too (no modify syntax), so whichever hits
-        first exits. Limit / stop-limit order: the new rule REPLACES the old one (AlgoDelta holds none)."""
+        Strategy order: AlgoDelta's original SL stays active too (no modify syntax), so whichever hits first exits;
+        its Target is held by the app (app_target), so a new Target REPLACES it (None / removed = no target).
+        Limit / stop-limit order: the new rule REPLACES the old one (AlgoDelta holds none)."""
         r = next((o for o in self.order_log if o["id"] == row_id), None)
         if not r or not self.order_rule_editable(r):
             return False
@@ -1664,12 +1725,16 @@ class Engine:
             self._rewrite_orders_file()
             self.bump("orders", "watch")
             return True
+        if kind == "tgt" and exit_rules.is_none(rule):  # app-held target: None = no target, the same as removing
+            rule = None
         r["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule else ""
         what = "SL" if kind == "sl" else "Target"
+        held = kind == "tgt" and self.app_target(r)
         self.log(f"{r['index']} {r['strike']}{r['opt']} order: {what} "
-                 + (f"set to {exit_rules.describe(rule)}" if rule else "removed"))
+                 + (f"{'changed' if held else 'set'} to {exit_rules.describe(rule)}" if rule else "removed")
+                 + (" (app-held target, replaces the old one)" if held else ""))
         self._rewrite_orders_file()
-        self.bump("orders")
+        self.bump("orders", "watch")
         return True
 
 
