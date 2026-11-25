@@ -1,6 +1,6 @@
 # CLAUDE.md: BEP AlgoDelta project context (read at the start of every session)
 
-Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = the app-held Target PR (decision 36, after PR #62, the CLAUDE.md hand-off of the 25 Nov session); updated together with each feature PR).
+Repo: `ArunkumarEkambaram/BEP-AlgoDelta` (branch `main`, latest merge = PR #63 (the app-held Target, decision 36); updated together with each feature PR).
 Run: `python app.py` → http://localhost:8083. Needs `nicegui>=3.1.0`, Python 3.14 on the user's PC.
 Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 Nov 2026: the same BEP logic with orders sent directly to Upstox; see "BEP Upstox" below), `ArunkumarEkambaram/LTP_Crossing` (reference only, do not change).
 **This app stays the user's live app and the safety backup** until BEP Upstox is proven live (decision on Fri 11 Dec 2026).
@@ -265,6 +265,7 @@ Related repos: `ArunkumarEkambaram/BEP_Upstox` (**the successor app**, built 24 
      - Example: the 23 Nov 10:15 BEP cross 25500CE (BEP 167.57, LTP 156.60): Stop-limit sends `sl_order` trigger 167.57 → limit 168.57 and waits for the CE to rise back above its BEP.
      - Merged 23 Nov 2026; the user confirmed Stop-limit shows on Pair cards.
    - **Manual Entry default = Stop-limit (PR #40, user request 23 Nov):** the form opens on Stop-limit. The trigger is **not** pre-filled (it must be above the LTP; the LTP shows beside it); typing it fills the limit = trigger + 1. The LTP pre-fill of the price box now applies only to Price / Limit.
+   - **Form check (user, 25 Nov, all suggested):** Add card / Add & place refuse a Stop-limit whose trigger is at or below a **fresh LTP** (quoted at the click): "Stop-limit: the trigger 190.00 must be above the LTP 238.65. To buy on a dip, use Limit or Price." No LTP (not connected) → the card is added and ⚡ still checks. Why: a 190 trigger with LTP 238.65 was added and only ⚡ refused it. (Both apps.)
    - **Not yet tested live:** AlgoDelta `sl_order` → Upstox (order_type "SL", status names), and what `cancel_order` does to a trigger-pending order. Test with 1 lot. Merged 23 Nov 2026; the user confirmed the card shows correctly and planned the 1-lot live test on 24 Nov, but 24 Nov is a market holiday, so it moves to the next trading day.
 
 29. **Manual Entry BEP and Target "None" (PR #48, user request 23 Nov):**
