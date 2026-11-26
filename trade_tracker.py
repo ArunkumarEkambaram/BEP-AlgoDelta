@@ -193,9 +193,15 @@ def base_rules(prm: dict) -> list:
 
 
 def custom_rules(row) -> list:
-    """Per-order SL / Target set in the app (Order Management before placing, Order Details after)."""
-    return [r for r in (exit_rules.parse(row.get("c_sl")), exit_rules.parse(row.get("c_tgt")))
-            if r and not exit_rules.is_none(r)]
+    """Per-order SL / Target set in the app (Order Management before placing, Order Details after), checked here on
+    1-min candles. A strategy order's LTP / POINT rules are watched by the engine on the live LTP instead
+    (check_app_sls / check_app_targets, user 26 Nov), so only its CANDLE rules are returned: no late candle exit
+    and no dry-run exit at the level instead of the real price."""
+    rules = [r for r in (exit_rules.parse(row.get("c_sl")), exit_rules.parse(row.get("c_tgt")))
+             if r and not exit_rules.is_none(r)]
+    if not row.get("mg"):
+        rules = [r for r in rules if r.get("type") == "CANDLE"]
+    return rules
 
 
 def simulate_exit(entry: float, entry_time: str, candles: list, prm: dict, now):

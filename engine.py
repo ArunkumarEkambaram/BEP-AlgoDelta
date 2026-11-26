@@ -840,6 +840,7 @@ class Engine:
             await self.check_limits()
             await self.check_app_trails()
             await self.check_app_targets()
+            await self.check_app_sls()
 
     async def place_watch_order(self, name, row_id, fill_ltp=None, entry_note=""):
         """Sends the card's order now (market). Signal LTP = the live LTP at the click / at the price hit (dry-run
@@ -1750,11 +1751,48 @@ class Engine:
             await self.square_off(o["id"], "App target")
 
     @staticmethod
+    def app_sl_level(o):
+        """Price level of an order's LTP / POINT SL set in the app after placing (c_sl; None for CANDLE / none /
+        no entry yet). Strategy orders only: limit orders keep theirs in mg (limit_orders)."""
+        if o.get("mg"):
+            return None
+        rule = exit_rules.parse(o.get("c_sl"))
+        if not rule or rule.get("type") not in ("LTP", "POINT"):
+            return None
+        if rule["type"] == "LTP":
+            return float(rule["value"])
+        entry = trade_tracker._f(o.get("entry"))
+        return round(entry - float(rule["value"]), 2) if entry is not None else None
+
+    async def check_app_sls(self):
+        """Every OPTION_LTP_SECONDS in market hours: LTP / POINT SLs set in the app after placing a strategy order
+        (user, 26 Nov) on the live LTP, like the app target. LTP at or below the level -> square-off once
+        ("App SL"); dry run exits at a fresh LTP. AlgoDelta's own SL stays active too: whichever hits first.
+        CANDLE SLs stay on candle closes (trade_tracker)."""
+        for o in list(self.order_log):
+            if o.get("mg") or not self.is_open(o):
+                continue
+            rule = exit_rules.parse(o.get("c_sl"))
+            if not rule or rule.get("done"):
+                continue
+            level = self.app_sl_level(o)
+            ltp = self.option_ltp.get(self._opt_key(o))
+            if level is None or ltp is None or ltp > level:
+                continue
+            rule["done"] = f"{_stamp()} at {level:g}"
+            o["c_sl"] = json.dumps(rule)
+            self.log(f"{o['index']} {o['strike']}{o['opt']}: app SL hit (LTP {ltp}, level {level:g}) - squaring off.")
+            await self.square_off(o["id"], "App SL")
+
+    @staticmethod
     def exit_label(o) -> str:
         """Why a strategy order was closed by the app / you, for the card chip ("" if not known)."""
         rule = exit_rules.parse((o or {}).get("c_tgt"))
         if rule and rule.get("done"):
             return "App target"
+        rule = exit_rules.parse((o or {}).get("c_sl"))
+        if rule and rule.get("done") and not (o or {}).get("mg"):
+            return "App SL"
         t = Engine.app_trail(o or {})
         if t and t.get("done"):
             return "App trailing SL"
