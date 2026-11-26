@@ -376,6 +376,22 @@ class Engine:
         settings_store.save()
         self.bump("settings")
 
+    def set_opening_order(self, name, on: bool):
+        """Setup > 09:15 opening order switch (saved; default OFF): the automatic 09:15 BEP order is placed or not."""
+        config.AUTO_ORDER[name]["open_order_on"] = bool(on)
+        settings_store.save()
+        self.log(f"{name} 09:15 BEP order switched {'ON' if on else 'OFF'} (Setup).")
+        self.bump("settings")
+
+    def set_skip_today(self, name, skip: bool):
+        """"No trade today": skip only today's 09:15 BEP order; it resets by itself the next day (saved date)."""
+        today = _now().strftime("%Y-%m-%d")
+        config.AUTO_ORDER[name]["open_skip_date"] = today if skip else ""
+        settings_store.save()
+        self.log(f"{name} 09:15 BEP order: " + ("No trade today - today's 09:15 order is skipped." if skip
+                                                 else "No trade today removed - today's 09:15 order is allowed."))
+        self.bump("settings")
+
     def toggle_alerts(self):
         config.ALERTS_PAUSED = not config.ALERTS_PAUSED
         self.log("Alerts PAUSED" if config.ALERTS_PAUSED else "Alerts RESUMED")
