@@ -129,6 +129,8 @@ def _default_auto_order() -> dict:
         # once the high reaches entry + trigger, SL = high - gap in steps of point, never down
         # Testing (25 Nov): skip each side's 1st 09:15 signal and order on the 2nd (after a dip below BEP + entry)
         "open_skip_first": True,
+        "open_order_on": False,          # Setup > 09:15 opening order: place the automatic 09:15 BEP order (user, 26 Nov)
+        "open_skip_date": "",            # "No trade today": skip only that day's 09:15 order (YYYY-MM-DD)
         "open_trail": True, "open_trail_trigger": 20, "open_trail_point": 1, "open_trail_gap": 19,
         # ⚡ on a BEP card (⭐ / BEP cross Pair / Manual Entry): "Check before placing" when the LTP (or the limit
         # price) is more than this many points above the strike's BEP (PR #43; 0 = off)
