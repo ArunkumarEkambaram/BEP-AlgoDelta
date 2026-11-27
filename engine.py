@@ -1057,6 +1057,9 @@ class Engine:
                 added = True
                 self.log(f"{name} BEP Pair cross {sig['time']} added to Order Management > Pair: "
                          f"{CommonWatch.pair_title(row)} (buffer 0) - Place order is ready.")
+                for s in self.watches[name].drop_star_twins(row):
+                    self.log(f"{name} \u2b50 {s['strike']}{s['opt']} at {s['trig_time']} removed from Order Management "
+                             f"(BEP cross Pair card on the same option, same candle).")
             else:
                 self.log(f"{name} BEP Pair cross {sig['time']} not added to Order Management: {why}.")
         return added
@@ -1071,6 +1074,10 @@ class Engine:
                     not in (None, "restricted"):
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to Order Management "
                          f"({e['opt']} already has its 09:15 opening order).")
+                continue
+            if cw.cross_twin(e["strike"], e["opt"], e["time"]):
+                self.log(f"{name} \u2b50 {e['strike']}{e['opt']} at {e['time']} not added to Order Management "
+                         f"(BEP cross Pair card on the same option, same candle).")
                 continue
             row = cw.add_star(e)
             if row:
@@ -1132,12 +1139,13 @@ class Engine:
                             self.log(notifier.support_label(e))
                         if not config.ALERTS_PAUSED:               # one short toast per scan; full text in the Log
                             self.notify("\n".join(notifier.support_short(alerts)), "positive", f"{name} BEP Support")
-                    star_added = self._add_star_rows(name, alerts)
-                    star_failed = self.watches[name].sync_star_failures(mon.support)
                     if res.get("cross_changed"):
                         self.bump("cross")
                     cross_failed = self.watches[name].sync_cross_failures(mon.cross.rows)   # first: frees a
                     cross_added = self._cross_signals(name, mon.pop_cross_signals())        # failed pair's strikes
+                    # ⭐ after the BEP cross: a ⭐ on the cross buy leg (same option, same candle) is not added
+                    star_added = self._add_star_rows(name, alerts)
+                    star_failed = self.watches[name].sync_star_failures(mon.support)
 
                     now = _now()
                     before = [(r["id"], r["status"], r["last_time"]) for r in self.watches[name].rows]
