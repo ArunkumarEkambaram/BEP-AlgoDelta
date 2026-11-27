@@ -15,10 +15,8 @@ import config
 PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "settings.json")
 TOKEN_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "upstox_token.json")
 _AUTO_KEYS = ("webhook_url", "confirmed", "tgt", "sl", "tgt_type", "sl_type", "qty", "exit_on_opposite", "trail",
-              "trail_type", "trail_trigger", "trail_point", "trail_gap", "max_above_bep", "templates",
-              "tgt_same", "tgt_pair", "tgt_star", "tgt_manual", "open_entry_above", "open_sl_below", "open_sl_tf", "open_max_sl",
-              "open_second_side", "open_second_side_secs",
-              "open_skip_first", "open_trail", "open_trail_trigger", "open_trail_point", "open_trail_gap", "warn_above_bep", "max_loss_day", "open_order_on", "open_skip_date")
+              "trail_type", "trail_trigger", "trail_point", "trail_gap", "templates",
+              "tgt_same", "tgt_pair", "tgt_star", "tgt_manual", "warn_above_bep", "max_loss_day")
 
 
 def load() -> str:
