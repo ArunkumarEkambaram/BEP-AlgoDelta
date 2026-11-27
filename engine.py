@@ -1,8 +1,8 @@
 """
 engine.py - the app's single background engine.
 
-Everything that is not drawing the screen lives here: the Upstox connection, the BEP Support scan, the 09:15
-opening order, Order Management (common price + ⭐ rows), AlgoDelta orders and their Entry / Exit tracking, the log and the alerts.
+Everything that is not drawing the screen lives here: the Upstox connection, the BEP Support scan,
+Order Management (common price + ⭐ rows), AlgoDelta orders and their Entry / Exit tracking, the log and the alerts.
 It runs ONCE for the whole app (app.timer in app.py), however many browser tabs are open. The pages only read
 its state; each change bumps a version number so a page knows when to redraw. Alerts are queued as events that
 every open tab shows once.
@@ -34,7 +34,6 @@ ORDER_FILE_COLUMNS = ["id", "time", "index", "opt", "strike", "kind", "bep", "lt
                       "expiry", "qty", "exit", "exit_time", "exit_reason", "c_sl", "c_tgt", "c_done", "sq", "mg", "c_trail"]
 ORDER_LOCKED = ("SENT", "DRY RUN", "sending")
 ORDER_STATUS = {"dry_run": "DRY RUN", "sent": "SENT", "failed": "FAILED", "blocked": "BLOCKED"}
-_LOCKING_STATUS = {"SENT": "sent", "DRY RUN": "dry_run", "FAILED": "failed"}
 
 
 def _now():
@@ -76,12 +75,10 @@ class Engine:
         self.bep_upload_text = {n: "" for n in config.INDEXES}
         self.scan_timer = None
         self._scan_busy = False
-        self._open_busy = False
         self._trades_at = 0.0
         self._book_at = 0.0                                  # last Upstox order-book read (limit orders)
         self._limit_busy = False
         self.order_log = self._load_orders_today()
-        self._restore_side_locks()
         self.log(f"App started. {self.settings_status} Dry run is ON.")
 
     # ------------------------------------------------------------------ helpers
@@ -171,16 +168,6 @@ class Engine:
             r.setdefault("mg", "")
             r.setdefault("c_trail", "")
         return rows
-
-    def _restore_side_locks(self):
-        today = _now().strftime("%Y-%m-%d")
-        for r in self.order_log:
-            status = _LOCKING_STATUS.get(r.get("status"))
-            if status and r.get("index") in self.monitors and r.get("opt") in ("CE", "PE") \
-                    and r.get("kind", "Opening candle") == "Opening candle":
-                mon = self.monitors[r["index"]]
-                if (today, r["opt"]) not in mon.side_lock:
-                    mon.lock_side(today, r["opt"], r.get("strike"), r.get("time", ""), status)
 
     def _save_order_row(self, row: dict):
         try:
@@ -374,22 +361,6 @@ class Engine:
     def set_daily_limit(self, n: int):
         config.AUTO_ORDER_DAILY_LIMIT = max(1, int(n))
         settings_store.save()
-        self.bump("settings")
-
-    def set_opening_order(self, name, on: bool):
-        """Setup > 09:15 opening order switch (saved; default OFF): the automatic 09:15 BEP order is placed or not."""
-        config.AUTO_ORDER[name]["open_order_on"] = bool(on)
-        settings_store.save()
-        self.log(f"{name} 09:15 BEP order switched {'ON' if on else 'OFF'} (Setup).")
-        self.bump("settings")
-
-    def set_skip_today(self, name, skip: bool):
-        """"No trade today": skip only today's 09:15 BEP order; it resets by itself the next day (saved date)."""
-        today = _now().strftime("%Y-%m-%d")
-        config.AUTO_ORDER[name]["open_skip_date"] = today if skip else ""
-        settings_store.save()
-        self.log(f"{name} 09:15 BEP order: " + ("No trade today - today's 09:15 order is skipped." if skip
-                                                 else "No trade today removed - today's 09:15 order is allowed."))
         self.bump("settings")
 
     def toggle_alerts(self):
@@ -1065,15 +1036,10 @@ class Engine:
         return added
 
     def _add_star_rows(self, name, events) -> bool:
-        mon, cw, added = self.monitors[name], self.watches[name], False
+        cw, added = self.watches[name], False
         for e in events or []:
             if not e.get("in_window"):
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} not added to Order Management (outside ATM window).")
-                continue
-            if e["time"] == "09:15" and (mon.side_lock.get((e.get("day"), e["opt"])) or {}).get("status") \
-                    not in (None, "restricted"):
-                self.log(f"{name} ⭐ {e['strike']}{e['opt']} at 09:15 not added to Order Management "
-                         f"({e['opt']} already has its 09:15 opening order).")
                 continue
             if cw.cross_twin(e["strike"], e["opt"], e["time"]):
                 self.log(f"{name} \u2b50 {e['strike']}{e['opt']} at {e['time']} not added to Order Management "
@@ -1085,17 +1051,6 @@ class Engine:
                 self.log(f"{name} ⭐ {e['strike']}{e['opt']} at {e['time']} added to Order Management "
                          f"(BEP {e['bep']:.2f}, close {e['close']:.2f}) - Place order is ready.")
         return added
-
-    # ------------------------------------------------------------------ order sending
-    async def dispatch_orders(self, name):
-        mon = self.monitors[name]
-        for sig in mon.pop_order_signals():
-            res = await run.io_bound(order_bridge.send_order, sig)
-            mon.record_order_result(sig, res["status"])
-            self.log(res["message"])
-            self.add_order_row(sig, res)
-            self.notify(res["message"][:160], {"sent": "positive", "dry_run": "info"}.get(res["status"], "negative"))
-        self.bump("plan")
 
     # ------------------------------------------------------------------ background loops
     async def scan(self):
@@ -1167,44 +1122,11 @@ class Engine:
 
                     await self.handle_pair_exits(name)
                     await self.cancel_dead_limits(name)
-                    await self.dispatch_orders(name)
                 except Exception as ex:
                     self.log(f"{name} BEP monitor error: {ex}")
             await self.refresh_order_tracking()
         finally:
             self._scan_busy = False
-
-    async def opening(self):
-        """Every OPENING_TICK_SECONDS. Prep window (OPENING_PREP_START-09:15): read the pre-open price and prepare
-        strikes / BEPs. 09:15:00-09:20: check only the prepared strikes and send at once."""
-        if not self.connected or self._open_busy:
-            return
-        now = _now()
-        h, m = (int(x) for x in config.OPENING_PREP_START.split(":"))
-        start = now.replace(hour=h, minute=m, second=0, microsecond=0)
-        first = now.replace(hour=9, minute=15, second=0, microsecond=0)
-        end = now.replace(hour=9, minute=20, second=0, microsecond=0)
-        if not (start <= now < end) or not market_utils.is_trading_day(now):
-            return
-        self._open_busy = True
-        try:
-            for name in self.active():
-                mon, msgs = self.monitors[name], []
-                try:
-                    if now < first:
-                        ltps, _err = await run.io_bound(self.fetch_index_ltps, [name])
-                        if ltps.get(name) is not None:
-                            self.ltp[name] = ltps[name]
-                            await run.io_bound(mon.prepare_opening, self.client, ltps[name], now, msgs.append)
-                    else:
-                        await run.io_bound(mon.opening_tick, self.client, now, msgs.append)
-                except Exception as ex:
-                    msgs.append(f"{name} opening order error: {ex}")
-                for msg in msgs:
-                    self.log(msg)
-                await self.dispatch_orders(name)
-        finally:
-            self._open_busy = False
 
     async def refresh_order_tracking(self):
         if not any(r.get("status") in trade_tracker.TRACKED for r in self.order_log):
@@ -1858,12 +1780,9 @@ class Engine:
 
     @staticmethod
     def order_trail_editable(r) -> bool:
-        """The trailing SL of a placed order can be set / changed / removed: every order whose SL / Target can be,
-        plus the open 09:15 order (the app holds its trail; AlgoDelta's max SL is never trailed)."""
-        if Engine.order_rule_editable(r):
-            return True
-        return (Engine.is_opening(r) and r.get("status") in ("SENT", "DRY RUN")
-                and trade_tracker._f(r.get("exit")) is None and not r.get("c_done") and not Engine.squared_off(r))
+        """The trailing SL of a placed order can be set / changed / removed: the same orders whose SL / Target can be
+        (the automatic 09:15 BEP order was removed on 27 Nov; its old orders are display only)."""
+        return Engine.order_rule_editable(r)
 
     @staticmethod
     def order_rule(o, kind):

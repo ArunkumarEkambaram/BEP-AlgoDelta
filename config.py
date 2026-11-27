@@ -29,13 +29,8 @@ LIMIT_CANCEL_CONFIRM_SECONDS = 30      # cancel_order not seen in the order book
 LIMIT_SANITY_PCT = 20                  # ask first when the limit price is this % or more away from the LTP
 STOP_LIMIT_GAP = 1.0              # Manual Stop-limit: default limit price = trigger + this (editable)
 
-# 09:15 opening order. From PREP_START to 09:15 the app reads NIFTY's pre-open price, picks the strike just
-# below and just above it (same two for CE and PE) and looks up their BEPs. From 09:15:00 to 09:20 it checks
-# only those strikes every OPENING_TICK_SECONDS with one Upstox call. Not prepared before 09:15 = no order today.
-OPENING_PREP_START = "09:08"
 PAIR_AUTO_FROM = "09:15:00"        # Pair "Auto at 09:15": active from (incl.) ...
 PAIR_AUTO_TO = "09:30:00"          # ... until (excl.); after it the row is a normal Pair (alert + ⚡)
-OPENING_TICK_SECONDS = 1
 
 # Live scan interval (seconds).
 SCAN_INTERVAL_SECONDS = 10
@@ -116,30 +111,13 @@ def _default_auto_order() -> dict:
         "webhook_url": "", "confirmed": False,
         "tgt": 50, "sl": 12, "tgt_type": "POINT", "sl_type": "POINT", "qty": 1,
         "exit_on_opposite": False,
-        "max_above_bep": 15,          # 09:15 order is skipped when LTP - BEP >= this many points
-        # 09:15 order (PR #41): enters at LTP >= BEP + open_entry_above; its SL is a CANDLE close below
-        # BEP - open_sl_below on open_sl_tf-minute candles, watched by the app (AlgoDelta gets is_sl false)
-        "open_entry_above": 2, "open_sl_below": 2, "open_sl_tf": 5,
-        # PR #47: a hard max SL held by AlgoDelta (POINT, from its fill) on top of the app CANDLE SL; 0 = none
-        "open_max_sl": 17,
-        # Testing feature (24 Nov): once one side (CE / PE) has its 09:15 order, the other side may follow only
-        # within this many seconds of it; later it is restricted for the day (Setup switch, ON by default)
-        "open_second_side": True, "open_second_side_secs": 60,
-        # The 09:15 order's own trailing SL (watched by the app; independent of the Default order trail):
-        # once the high reaches entry + trigger, SL = high - gap in steps of point, never down
-        # Testing (25 Nov): skip each side's 1st 09:15 signal and order on the 2nd (after a dip below BEP + entry)
-        "open_skip_first": True,
-        "open_order_on": False,          # Setup > 09:15 opening order: place the automatic 09:15 BEP order (user, 26 Nov)
-        "open_skip_date": "",            # "No trade today": skip only that day's 09:15 order (YYYY-MM-DD)
-        "open_trail": True, "open_trail_trigger": 20, "open_trail_point": 1, "open_trail_gap": 19,
         # ⚡ on a BEP card (⭐ / BEP cross Pair / Manual Entry): "Check before placing" when the LTP (or the limit
         # price) is more than this many points above the strike's BEP (PR #43; 0 = off)
         "warn_above_bep": 10,
         # Max loss per day (₹, 0 = off; DRY RUN orders only for now): once today's closed + open P&L of the
         # dry-run orders is a loss of this much, ⚡ asks first and a PENDING card that fires later is not placed.
-        # The automatic 09:15 order is never stopped by it.
         "max_loss_day": 2000,
-        # default targets per Order Management type (the 09:15 opening order uses "tgt" / "tgt_type");
+        # default targets per Order Management type
         # each row can override value and type until it is ordered
         "tgt_same": 50, "tgt_pair": 50, "tgt_star": 50, "tgt_manual": 50,
         "trail": False, "trail_type": "LTP", "trail_trigger": 20, "trail_point": 1, "trail_gap": 19,

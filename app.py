@@ -209,7 +209,7 @@ def root():
         app_sl_badge.tooltip("Limit orders: the SL / Target are watched by this app - keep this PC on and the app running")
         loss_badge = ui.badge("").props("rounded color=red-9").classes("text-sm px-2 py-1")
         loss_badge.tooltip("Max loss per day (Dry run orders, closed + open P&L): new orders ask first; a PENDING "
-                           "card that fires is not placed; the 09:15 order is not affected")
+                           "card that fires is not placed")
         alerts_badge = ui.badge("ALERTS PAUSED").props("rounded color=red")
         alert_btn = ui.button("", on_click=engine.toggle_alerts).props("dense no-caps")
         algo_btn = ui.button("", on_click=engine.toggle_algo_pause).props("dense no-caps")
@@ -387,16 +387,6 @@ def dashboard_page():
 
     for name in engine.active():
         mon = engine.monitors[name]
-        with ui.card().classes("w-full"):
-            card_title(f"{name} — 09:15 opening order", "alarm")
-            plan_lbl = ui.label("").classes("text-sm")
-            lock_lbl = ui.label("").classes("text-sm font-medium text-blue-5")
-
-            def refresh_plan(mon=mon, plan_lbl=plan_lbl, lock_lbl=lock_lbl):
-                plan_lbl.set_text(mon.plan_text())
-                lock_lbl.set_text(mon.side_status_text())
-            ui.timer(2.0, refresh_plan)
-
         cards = {}
         with ui.row().classes("w-full gap-4"):
             for key, title, colour in (("first_CE", "First CE", "green"), ("first_PE", "First PE", "red"),
@@ -1167,48 +1157,6 @@ def card_rule_box(name, r, kind, locked):
                 ui.label(f"Set {what}").classes("text-blue-5 font-medium cursor-pointer") \
                     .on("click", lambda: rule_dialog(f"Add {what}", kind, None, on_set, allow_none=True))
                 ui.label(f"Default {d_val:g} {d_type} (Setup)").classes("text-xs opacity-60")
-
-
-def opening_trail_dialog(r):
-    """Order Details: the open 09:15 order's trailing SL (the only rule that can change on it). The candle SL, the
-    AlgoDelta max SL and the Target stay. A change keeps the high seen so far and never moves the SL down;
-    "Check the stoploss" asks first when the new SL would be at or above the LTP (an exit at once)."""
-    rid = r["id"]
-    t = engine.app_trail(r)
-    cfg = config.AUTO_ORDER.get(r["index"], {})
-    cur = {"on": True, "type": "LTP", "trigger": t["trigger"], "point": t["step"], "gap": t["gap"]} if t else {
-        "on": True, "type": "LTP", "trigger": float(cfg.get("open_trail_trigger", 20)),
-        "point": float(cfg.get("open_trail_point", 1)), "gap": float(cfg.get("open_trail_gap", 19))}
-
-    def save(tr):
-        entry = trade_tracker._f(r.get("entry"))
-        ltp = engine.option_ltp.get(engine._opt_key(r))
-        if tr and tr.get("on") and entry is not None and ltp is not None:
-            high = max([h for h in ((t or {}).get("high"), ltp) if h is not None])
-            test = {"trigger": float(tr["trigger"]), "gap": float(tr["gap"]), "step": float(tr.get("point") or 1),
-                    "high": high}
-            if t and not t.get("done"):
-                old = engine.trail_level(t, entry)
-                if old is not None:
-                    test["floor"] = old
-            lvl = engine.trail_level(test, entry)
-            if lvl is not None and lvl >= ltp:
-                with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 420px"):
-                    ui.label("Check the stoploss").classes("text-lg font-bold text-orange-6")
-                    ui.label(f"With this trail the SL is {lvl:g}, at or above the LTP {ltp:g}: the order would be "
-                             "squared off at once.").classes("text-sm")
-                    with ui.row():
-                        ui.button("Cancel", on_click=dlg.close).props("flat")
-                        ui.button("Set anyway", on_click=lambda: (dlg.close(), engine.set_order_trail(rid, tr))) \
-                            .props("color=orange-8")
-                dlg.open()
-                return True
-        return engine.set_order_trail(rid, tr)
-
-    trail_dialog(r["index"], {}, cur=cur, on_save=save,
-                 note="09:15 order: watched by the app on the live LTP. This replaces its trailing SL; the high seen "
-                      "so far is kept and the SL never moves down. The 5-min candle SL, AlgoDelta's max SL and the "
-                      "Target stay as they are. OFF removes the trail.")
 
 
 def trail_dialog(name, r, cur=None, on_save=None, note=None):
@@ -2487,9 +2435,6 @@ def orders_page():
         if not r or not engine.order_trail_editable(r):
             ui.notify("This order can no longer be changed.", type="warning")
             return
-        if not engine.order_rule_editable(r):         # the open 09:15 order: only its trailing SL can change
-            opening_trail_dialog(r)
-            return
         cfg = config.AUTO_ORDER.get(r["index"], {})
         with ui.context.client.layout, ui.dialog() as dlg, ui.card().style("width: 460px"):
             ui.label(f"{r['index']} {r['strike']}{r['opt']} \u2014 SL / Target").classes("text-lg font-bold")
@@ -2693,8 +2638,8 @@ def setup_page():
             max_loss.on("keydown.enter", lambda: engine.set_max_loss(max_loss.value))
             max_loss.tooltip("Today's closed + open P&L of the Dry run orders. Once the loss reaches this: \u26a1 / "
                          "Add & place ask first, a PENDING card that fires is not placed, open positions are left "
-                         "alone. The 09:15 order is not affected.")
-            ui.label("Max loss: Dry run only for now; the 09:15 order is not affected.").classes("text-xs opacity-70")
+                         "alone.")
+            ui.label("Max loss: Dry run only for now.").classes("text-xs opacity-70")
             ui.label("Pause alerts / Pause algo are in the header.").classes("text-xs opacity-70")
 
     for name in config.INDEXES:
@@ -2750,59 +2695,6 @@ def algodelta_card(name):
                                         value=ad_cfg.get("warn_above_bep", 10), min=0, step=1).classes("w-full") \
                     .tooltip("BEP Support \u2b50, BEP cross Pair and Manual Entry cards: 'Check before placing' "
                              "shows the LTP - BEP difference")
-
-            # ---- 09:15 opening order
-            with setup_section("09:15 opening order", "alarm"):
-                ui.label("Target = the Default order Target value.").classes("text-xs opacity-70")
-                today = datetime.now(market_utils.IST).strftime("%Y-%m-%d")
-                with ui.row().classes("w-full items-center gap-4"):
-                    ad_open_on = ui.switch("09:15 BEP order", value=bool(ad_cfg.get("open_order_on", False)),
-                                           on_change=lambda e, n=name: engine.set_opening_order(n, e.value)) \
-                        .tooltip("ON: the automatic 09:15 BEP order is placed. OFF (default): no 09:15 order; the plan "
-                                 "and the signals still show on the Dashboard / Log. Saved at once.")
-                    ad_skip_today = ui.checkbox("No trade today", value=ad_cfg.get("open_skip_date") == today,
-                                                on_change=lambda e, n=name: engine.set_skip_today(n, e.value)) \
-                        .tooltip("Skip only today's 09:15 BEP order; it resets by itself tomorrow. Saved at once.")
-                    ad_skip_today.bind_enabled_from(ad_open_on, "value")
-                ad_max_above = ui.number("Max points above BEP (skip at or above)",
-                                         value=ad_cfg.get("max_above_bep", 15), min=0, step=1).classes("w-full")
-                with ui.row().classes("w-full gap-2 no-wrap"):
-                    ad_open_entry = ui.number("Entry above BEP +", value=ad_cfg.get("open_entry_above", 2),
-                                              min=0, step=0.5).classes("flex-1") \
-                        .tooltip("The 09:15 order fires at LTP >= BEP + this (0 = just above BEP)")
-                    ad_open_sl = ui.number("SL: close below BEP -", value=ad_cfg.get("open_sl_below", 2),
-                                           min=0, step=0.5).classes("flex-1") \
-                        .tooltip("CANDLE SL watched by the app: squares off when a candle CLOSES below BEP - this")
-                    ad_open_tf = ui.select({1: "1 min", 3: "3 min", 5: "5 min"}, value=int(ad_cfg.get("open_sl_tf", 5)),
-                                           label="SL candle").classes("w-28")
-                ad_open_max = ui.number("Max SL: points below the fill (AlgoDelta, 0 = none)",
-                                        value=ad_cfg.get("open_max_sl", 17), min=0, step=1).classes("w-full") \
-                    .tooltip("A POINT SL held by AlgoDelta from its fill (e.g. entry 152 - 17 = 135), on top of the "
-                             "candle SL: exits on a fast fall or if this PC is off. The trailing SL stays with the app.")
-                with ui.row().classes("w-full gap-2 no-wrap items-center"):
-                    ad_open_second_on = ui.switch("Second side window",
-                                                  value=bool(ad_cfg.get("open_second_side", True))) \
-                        .tooltip("Testing: once CE or PE has its 09:15 order, the other side may follow only within "
-                                 "the seconds set here; later it is restricted for the day. Both within the window = "
-                                 "both placed. OFF = each side any time 09:15-09:20.")
-                    ad_open_second = ui.number("Second side within (seconds)",
-                                               value=ad_cfg.get("open_second_side_secs", 60), min=1, step=5) \
-                        .classes("flex-1").bind_enabled_from(ad_open_second_on, "value")
-                ad_open_skip = ui.switch("09:15: skip the first signal", value=bool(ad_cfg.get("open_skip_first", True))) \
-                    .tooltip("Testing: each side's 1st 09:15 signal is not ordered. The order goes on the 2nd: a strike "
-                             "whose LTP fell back below BEP + entry after the 1st and meets all the rules again before "
-                             "09:20 (either strike of that side). No 2nd signal = no 09:15 order for that side. OFF = "
-                             "order on the 1st signal.")
-                ad_open_trail = ui.switch("09:15 trailing SL", value=bool(ad_cfg.get("open_trail", True))) \
-                    .tooltip("The 09:15 order's own trail, watched by the app (not the Default order trail). Once "
-                             "the high reaches entry + Trigger, SL = high - Gap in steps of Point, never down. It can "
-                             "be changed on the placed order in Order Details.")
-                with ui.row().classes("w-full gap-2 no-wrap"):
-                    ad_open_t_trig = ui.number("Trigger", value=ad_cfg.get("open_trail_trigger", 20), min=0, step=1).classes("flex-1")
-                    ad_open_t_point = ui.number("Point", value=ad_cfg.get("open_trail_point", 1), min=0, step=1).classes("flex-1")
-                    ad_open_t_gap = ui.number("Gap", value=ad_cfg.get("open_trail_gap", 19), min=0, step=1).classes("flex-1")
-                for w in (ad_open_t_trig, ad_open_t_point, ad_open_t_gap):
-                    w.bind_enabled_from(ad_open_trail, "value")
 
         with ui.row().classes("items-center gap-2"):
             ui.button("Save", icon="save", on_click=lambda: save())
@@ -2864,31 +2756,9 @@ def algodelta_card(name):
                                                      ("tgt_star", ad_tgt_star), ("tgt_manual", ad_tgt_manual))}
         if any(v is None or v <= 0 for v in defaults.values()):
             return None, "Default targets (Same strike / Pair / BEP Support / Manual entry) must be numbers above 0."
-        max_above = num(ad_max_above.value)
-        if max_above is None or max_above <= 0:
-            return None, "Max points above BEP must be a number above 0."
-        open_second_on = bool(ad_open_second_on.value)
-        open_second = num(ad_open_second.value)
-        if open_second_on and (open_second is None or open_second <= 0):
-            return None, "09:15 second side window: seconds must be a number above 0 (or switch the window OFF)."
-        if open_second is None or open_second <= 0:
-            open_second = ad_cfg.get("open_second_side_secs", 60)
         warn_bep = num(ad_warn_bep.value)
         if warn_bep is None or warn_bep < 0:
             return None, "Warn above BEP must be a number of 0 or more (0 = off)."
-        open_entry, open_sl = num(ad_open_entry.value), num(ad_open_sl.value)
-        if open_entry is None or open_sl is None or open_entry < 0 or open_sl < 0:
-            return None, "09:15 entry above BEP and SL below BEP must be numbers of 0 or more."
-        open_max = num(ad_open_max.value)
-        if open_max is None or open_max < 0:
-            return None, "09:15 max SL must be a number of 0 or more (0 = none)."
-        open_trail = bool(ad_open_trail.value)
-        o_trig, o_point, o_gap = num(ad_open_t_trig.value), num(ad_open_t_point.value), num(ad_open_t_gap.value)
-        if open_trail:
-            if None in (o_trig, o_point, o_gap) or o_trig <= 0 or o_point <= 0 or o_gap <= 0:
-                return None, "09:15 trailing SL: Trigger, Point and Gap must be numbers above 0."
-            if o_gap > o_trig:
-                return None, "09:15 trailing SL: Gap must not be larger than Trigger."
         trail = bool(ad_trail.value)
         t_trig, t_point, t_gap = num(ad_trail_trigger.value), num(ad_trail_point.value), num(ad_trail_gap.value)
         if trail:
@@ -2897,14 +2767,7 @@ def algodelta_card(name):
             if t_gap > t_trig:
                 return None, "Gap must not be larger than Trigger (Gap = Trigger moves the SL to cost at the trigger)."
         return {"tgt": tgt, "sl": sl, "qty": int(qty), "tgt_type": ad_tgt_type.value, "sl_type": ad_sl_type.value,
-                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, "max_above_bep": max_above, **defaults,
-                "open_entry_above": open_entry, "open_sl_below": open_sl, "open_sl_tf": int(ad_open_tf.value or 5),
-                "open_max_sl": open_max, "open_second_side": open_second_on, "open_skip_first": bool(ad_open_skip.value),
-                "open_trail": open_trail,
-                "open_trail_trigger": o_trig if o_trig is not None else ad_cfg.get("open_trail_trigger", 20),
-                "open_trail_point": o_point if o_point is not None else ad_cfg.get("open_trail_point", 1),
-                "open_trail_gap": o_gap if o_gap is not None else ad_cfg.get("open_trail_gap", 19),
-                "open_second_side_secs": open_second, "warn_above_bep": warn_bep,
+                "exit_on_opposite": bool(ad_exit_opp.value), "trail": trail, **defaults, "warn_above_bep": warn_bep,
                 "trail_type": ad_trail_type.value,
                 "trail_trigger": t_trig if t_trig is not None else ad_cfg.get("trail_trigger", 20),
                 "trail_point": t_point if t_point is not None else ad_cfg.get("trail_point", 1),
@@ -2930,15 +2793,7 @@ def algodelta_card(name):
         ad_status.set_text(f"✅ {saved} Target {nums['tgt']} ({nums['tgt_type']}; rows: same {nums['tgt_same']:g}, "
                            f"pair {nums['tgt_pair']:g}, \u2b50 {nums['tgt_star']:g}, manual {nums['tgt_manual']:g}), SL {nums['sl']} ({nums['sl_type']}), "
                            f"qty {nums['qty']}; {trail_txt}; exit on opposite {'ON' if nums['exit_on_opposite'] else 'OFF'}; "
-                           f"09:15 order at LTP >= BEP + {nums['open_entry_above']:g} and < BEP + {nums['max_above_bep']}, "
-                           f"SL = {nums['open_sl_tf']}-min close below BEP - {nums['open_sl_below']:g} (app)"
-                           + (f", max SL {nums['open_max_sl']:g} pts (AlgoDelta)" if nums['open_max_sl'] else "")
-                           + (f", second side within {nums['open_second_side_secs']:g} s"
-                              if nums['open_second_side'] else ", second side window OFF")
-                           + (", 1st signal skipped" if nums['open_skip_first'] else "")
-                           + (f", trail {nums['open_trail_trigger']:g}/{nums['open_trail_gap']:g} "
-                              f"(point {nums['open_trail_point']:g}, app); " if nums['open_trail'] else ", trail OFF; ")
-                           + f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
+                           f"webhook {'set' if url else 'NOT set'}; JSON {'confirmed' if ad_confirm.value else 'NOT confirmed'} "
                            f"(live orders need both).")
 
     def preview():
@@ -2983,7 +2838,6 @@ def logs_page():
 # ====================================================================== background engine (once for the whole app)
 app.on_startup(engine.auto_connect)
 engine.scan_timer = app.timer(config.SCAN_INTERVAL_SECONDS, engine.scan)
-app.timer(config.OPENING_TICK_SECONDS, engine.opening)
 app.timer(config.OPTION_LTP_SECONDS, engine.option_tick)
 
 ui.run(title="BEP AlgoDelta", port=8083, reload=False, dark=True)
