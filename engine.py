@@ -889,12 +889,21 @@ class Engine:
         params, app_rules = {"tgt": tgt, "tgt_type": tgt_type, "qty": self.row_qty(name, r),
                              "trail": tr["on"], "trail_type": tr["type"], "trail_trigger": tr["trigger"],
                              "trail_point": tr["point"], "trail_gap": tr["gap"]}, {}
-        sl_own = exit_rules.parse(r.get("c_sl"))      # the row's own SL (popup in Order Management)
-        if sl_own and sl_own["type"] == "CANDLE":     # watched by the app -> AlgoDelta must not hold its own
-            params["is_sl"] = False
-            app_rules["c_sl"] = json.dumps({**sl_own, "set_at": ""})
-        elif sl_own:                                  # LTP / POINT -> sent to AlgoDelta as this order's value
-            params["sl"], params["sl_type"] = sl_own["value"], sl_own["type"]
+        # SL: held by the APP (AlgoDelta gets is_sl false, so no SL / trail there), so whatever SL is set after
+        # placing is the final one (user, 27 Nov). The card's own SL, else the Setup default SL.
+        params["is_sl"] = False
+        sl_rule = exit_rules.parse(r.get("c_sl"))
+        if sl_rule is None:
+            cfg = config.AUTO_ORDER[name]
+            try:
+                sl_rule = exit_rules.make_rule("sl", cfg.get("sl_type") if cfg.get("sl_type") in ("LTP", "POINT")
+                                               else "POINT", float(cfg.get("sl")), custom=False)
+            except (TypeError, ValueError):
+                sl_rule = None
+        if sl_rule:
+            app_rules["c_sl"] = json.dumps({**sl_rule, "set_at": ""})
+            if sl_rule["type"] != "CANDLE":            # kept in the payload for the record (is_sl false)
+                params["sl"], params["sl_type"] = sl_rule["value"], sl_rule["type"]
         # Target: always held by the APP (AlgoDelta gets is_tgt false), so it can be raised / lowered / removed after
         # placing. The card's own Target, else the Setup default for its type; None = no target at all.
         params["is_tgt"] = False
@@ -909,8 +918,7 @@ class Engine:
             app_rules["c_tgt"] = json.dumps({**tgt_rule, "set_at": ""})
             if tgt_rule["type"] != "CANDLE":           # kept in the payload for the record (is_tgt false)
                 params["tgt"], params["tgt_type"] = tgt_rule["value"], tgt_rule["type"]
-        sl_rule = exit_rules.parse(r.get("c_sl"))
-        if sl_rule and sl_rule["type"] == "CANDLE" and tr["on"]:   # AlgoDelta cannot trail (is_sl false): the app does
+        if tr["on"]:                                  # AlgoDelta cannot trail (is_sl false): the app does
             app_rules["c_trail"] = self._trail_json(tr)
         sig = {"index": name, "opt": r["opt"], "strike": r["strike"],
                "bep": (r.get("entry_price") or ltp) if kind == "manual" else r["price"],
@@ -938,7 +946,10 @@ class Engine:
         for ev in cw.pop_exits():
             row = next((o for o in self.order_log if o["id"] == ev.get("order_id")), None)
             opp = "PE" if ev["opt"] == "CE" else "CE"
-            why = f"opponent {opp} closed {ev['opp_close']:.2f} at {ev['fail_time']}"
+            ol = CommonWatch.opp_leg(ev)
+            why = (f"opponent {ol[1]}{ol[0]} closed {ev['opp_close']:.2f} at / above its line {ol[2]:.2f}, "
+                   f"{CommonWatch.candle_span(ev, ev['fail_time'])}" if ol else
+                   f"opponent {opp} closed {ev['opp_close']:.2f} at {ev['fail_time']}")
             if row is None:
                 continue
             already = isinstance(row.get("exit"), (int, float)) or trade_tracker._f(row.get("exit")) is not None \
@@ -1397,8 +1408,9 @@ class Engine:
                 waiting += 1
             elif m and self.is_open(o):
                 held += 1
-            elif not m and self.is_open(o) and self.app_target(o) and self.order_rule(o, "tgt"):
-                held += 1                             # strategy order with an app-held target
+            elif not m and self.is_open(o) and ((self.app_target(o) and self.order_rule(o, "tgt"))
+                                                or (self.app_sl(o) and (self.order_rule(o, "sl") or self.app_trail(o)))):
+                held += 1                             # strategy order with an app-held target / SL / trail
         return {"waiting": waiting, "held": held}
 
     async def place_limit_order(self, name, row_id):
@@ -1746,6 +1758,13 @@ class Engine:
                 and trade_tracker._params(o).get("is_tgt") is False)
 
     @staticmethod
+    def app_sl(o) -> bool:
+        """Strategy order whose SL is held by the app (sent with is_sl false): every Order Management order since
+        27 Nov (and older ones with a CANDLE SL). An edit REPLACES its SL, up or down: the last one set is final."""
+        return (not o.get("mg") and not Engine.is_opening(o) and bool(o.get("payload"))
+                and trade_tracker._params(o).get("is_sl") is False)
+
+    @staticmethod
     def app_target_level(o):
         """Price level of an order's app LTP / POINT target (None for CANDLE / None / no target / no entry yet)."""
         rule = exit_rules.parse(o.get("c_tgt"))
@@ -1792,8 +1811,9 @@ class Engine:
 
     async def check_app_sls(self):
         """Every OPTION_LTP_SECONDS in market hours: LTP / POINT SLs set in the app after placing a strategy order
-        (user, 26 Nov) on the live LTP, like the app target. LTP at or below the level -> square-off once
-        ("App SL"); dry run exits at a fresh LTP. AlgoDelta's own SL stays active too: whichever hits first.
+        (user, 26 Nov) and, since 27 Nov, every Order Management strategy order's only SL (app_sl: sent with is_sl
+        false) on the live LTP, like the app target. LTP at or below the level -> square-off once ("App SL"); dry run
+        exits at a fresh LTP. Older orders sent with an AlgoDelta SL keep it too: whichever hits first.
         CANDLE SLs stay on candle closes (trade_tracker)."""
         for o in list(self.order_log):
             if o.get("mg") or not self.is_open(o):
@@ -1886,10 +1906,11 @@ class Engine:
             rule = None
         r["c_" + kind] = json.dumps({**rule, "set_at": _stamp()}) if rule else ""
         what = "SL" if kind == "sl" else "Target"
-        held = kind == "tgt" and self.app_target(r)
+        held = self.app_target(r) if kind == "tgt" else self.app_sl(r)
         self.log(f"{r['index']} {r['strike']}{r['opt']} order: {what} "
-                 + (f"{'changed' if held else 'set'} to {exit_rules.describe(rule)}" if rule else "removed")
-                 + (" (app-held target, replaces the old one)" if held else ""))
+                 + (f"{'changed' if held else 'set'} to {exit_rules.describe(rule)}" if rule else
+                    "removed" + (" - NO SL on this order now" if held and kind == "sl" else ""))
+                 + (f" (app-held {what}, replaces the old one)" if held and rule else ""))
         self._rewrite_orders_file()
         self.bump("orders", "watch")
         return True
