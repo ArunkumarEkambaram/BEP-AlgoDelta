@@ -1026,6 +1026,19 @@ def card_ltp_text(name, r) -> str:
     return f"{v:.2f}" if v is not None else "--"
 
 
+def opp_text(name, r):
+    """Fired Pair card: the opponent leg, its live LTP and the line its candle close must stay below (else the
+    opponent exit / FAILED). Returns (text, past_line) or None."""
+    ol = CommonWatch.opp_leg(r)
+    if not ol or r["status"] not in ("triggered",):
+        return None
+    opp, strike, line = ol
+    v = engine.option_ltp.get((name, strike, opp))
+    gap = f" ({v - line:+.2f})" if v is not None else ""
+    return (f"Opp {strike}{opp} {v:.2f}" if v is not None else f"Opp {strike}{opp} --") \
+        + f" \u00b7 exit if a {r['tf']} min close \u2265 {line:.2f}" + gap, v is not None and v >= line
+
+
 def cross_bep_gaps(name, r):
     """BEP cross Pair card: live LTP minus BEP for the CE and the PE leg (None until an LTP arrives)."""
     lt = engine.option_ltp
@@ -1068,6 +1081,7 @@ def card_rule_box(name, r, kind, locked):
             d_type, d_val = prm[kind + "_type"], prm[kind]
     sent_none = bool(order) and not m and kind == "tgt" and exit_rules.is_none(rule)   # PR #48: sent with no target
     app_tgt = bool(order) and not m and kind == "tgt" and engine.app_target(order)     # target held by the app
+    app_sl_ = bool(order) and not m and kind == "sl" and engine.app_sl(order)          # SL held by the app (27 Nov)
 
     def on_set(new_rule):
         if engine.watches[name].set_custom(r["id"], kind, new_rule):
@@ -1089,16 +1103,23 @@ def card_rule_box(name, r, kind, locked):
                 if o_rule:
                     ui.icon("candlestick_chart" if o_rule["type"] == "CANDLE" else "trending_flat").classes("text-sm")
                 v = ui.label(f"{o_rule['value']:.2f}" if o_rule else
-                             ("--" if m else ("None" if sent_none or app_tgt else f"{d_val:g} {d_type}"))) \
+                             ("--" if m or app_sl_ else ("None" if sent_none or app_tgt else f"{d_val:g} {d_type}"))) \
                     .classes("text-lg font-bold")
                 if editable:
                     v.classes("cursor-pointer")
-                    v.on("click", lambda: rule_dialog(f"{what} (app-held)" if app_tgt else f"{what} (app-watched)",
+                    v.on("click", lambda: rule_dialog(f"{what} (app-held)" if app_tgt or app_sl_ else f"{what} (app-watched)",
                                                       kind, o_rule, on_order_set, allow_none=bool(m) or app_tgt))
                     if o_rule:
                         ui.button(icon="close", on_click=lambda: on_order_set(None)) \
                             .props("flat dense round size=xs color=red") \
-                            .tooltip(f"Remove the {what} (no {what} left)" if m or app_tgt else "Remove the app rule")
+                            .tooltip(f"Remove the {what} (no {what} left)" if m or app_tgt or app_sl_ else "Remove the app rule")
+            if app_sl_:                               # strategy order: the app holds its only SL (final)
+                lvl = engine.app_sl_level(order)
+                sub = (exit_rules.describe(o_rule) + (f" \u00b7 at {lvl:g}" if lvl is not None and o_rule["type"] == "POINT"
+                                                       else "") if o_rule
+                       else "no SL" + (" \u00b7 click to set" if editable else ""))
+                ui.label(sub + " \u00b7 app").classes("text-xs " + ("text-amber-5" if o_rule else "text-red-4"))
+                return
             if app_tgt:                               # strategy order: the app holds its only target
                 lvl = engine.app_target_level(order)
                 sub = (exit_rules.describe(o_rule) + (f" \u00b7 at {lvl:g}" if lvl is not None and o_rule["type"] == "POINT"
@@ -1300,8 +1321,9 @@ def card_trail_box(name, r, locked):
                 v.classes("cursor-pointer")
                 v.on("click", lambda _e=None, cur=cur: trail_dialog(
                     name, r, cur=cur, on_save=lambda tr: engine.set_order_trail(order["id"], tr),
-                    note="Watched by the app on the live LTP for this order. AlgoDelta's own trail (if sent) stays "
-                         "too - whichever hits first exits."))
+                    note="Watched by the app on the live LTP. This replaces the order's trailing SL (AlgoDelta holds "
+                         "none)." if engine.app_sl(order) else "Watched by the app on the live LTP for this order. "
+                         "AlgoDelta's own trail (if sent) stays too - whichever hits first exits."))
             return
         candle_sl = bool(sl_rule and sl_rule["type"] == "CANDLE")
         tr = engine.row_trail(name, r)
@@ -1604,7 +1626,8 @@ def order_card(name, r, place, live, note=None):
                 if r.get("source") == "manual":
                     ui.badge("Manual entry").props("color=indigo-7")
                 if r.get("kind") == "pair" and r.get("opt"):
-                    ui.badge(f"{r['opt']} fired").props("color=grey-8") \
+                    ol = CommonWatch.opp_leg(r)
+                    ui.badge(f"{r['opt']} fired" + (f" \u00b7 opp {ol[1]}{ol[0]}" if ol else "")).props("color=grey-8") \
                         .tooltip(f"{CommonWatch.pair_title(r)} \u00b7 the other leg is still watched for the "
                                  "opponent rule (FAILED before \u26a1, opponent SL after)")
                 if r.get("kind") == "pair" and r.get("auto") != "cross":
@@ -1685,6 +1708,8 @@ def order_card(name, r, place, live, note=None):
                 pts_lbl = ui.label("").classes("text-xs opacity-70")
             with card_box("LTP"):
                 ltp_lbl = ui.label("--").classes("text-lg font-bold whitespace-pre-line text-center leading-tight")
+                opp_lbl = ui.label("").classes("text-xs text-center leading-tight")
+                opp_lbl.set_visibility(CommonWatch.opp_leg(r) is not None and r["status"] == "triggered")
             gap_row = None
             if r.get("source") == "manual":
                 with card_box(level_name(r)):
@@ -1741,6 +1766,10 @@ def order_card(name, r, place, live, note=None):
     def refresh():
         o = engine.row_order(r)
         ltp_lbl.set_text(card_ltp_text(name, r).replace(" · ", "\n"))   # pair: CE and PE on two lines
+        ot = opp_text(name, r)
+        if ot:
+            opp_lbl.set_text(ot[0])
+            opp_lbl.classes(replace="text-xs text-center leading-tight " + ("text-red-4" if ot[1] else "opacity-70"))
         if gap_row is not None:
             gaps = [g for g in cross_bep_gaps(name, r) if not r.get("opt") or g[0] == r["opt"]]
             for lbl, (opt, gap) in zip(gap_row, gaps):
@@ -2277,8 +2306,8 @@ def pairstar_section(rows, place, name, notes, empty_text):
 def manual_page():
     om_header("Manual Entry", "Pick a strike and place a BUY yourself - no trigger condition. Market = order at "
               "⚡ / Add & place. Price = the app waits until the LTP reaches your price (either way: ↓ a dip or "
-              "↑ a breakout), then sends a market order; Stoploss / Trailing go with the AlgoDelta "
-              "strategy order, the Target is held by this app (change it any time while open; keep the PC on). Limit = buy at this price OR CHEAPER (AlgoDelta limit order): it waits only if the "
+              "↑ a breakout), then sends a market order; its Target / Stoploss / Trailing are held by "
+              "this app (AlgoDelta gets none): change them any time while open, the last one set is final (keep the PC on). Limit = buy at this price OR CHEAPER (AlgoDelta limit order): it waits only if the "
               "price is below the LTP; above the LTP it fills at once. Stop-limit = buy when the price RISES to the "
               "trigger (AlgoDelta sl_order, waits at the exchange), then a limit at the limit price. For Limit and "
               "Stop-limit the Target / Stoploss / Trailing are watched by THIS APP on the live LTP (square-off when "
@@ -2466,9 +2495,13 @@ def orders_page():
             ui.label(f"{r['index']} {r['strike']}{r['opt']} \u2014 SL / Target").classes("text-lg font-bold")
             lim = bool(r.get("mg"))
             app_tgt = engine.app_target(r)
+            app_sl_ = engine.app_sl(r)
             ui.label("Watched by the app; when hit, the position is squared off (live) or the exit is recorded "
                      "(dry run). " + ("Limit / stop-limit order: a change REPLACES its SL / Target (AlgoDelta holds "
                                       "none)." if lim else
+                                      "SL, Target and trailing SL are held by the app (AlgoDelta holds none): a "
+                                      "change REPLACES them - the last one you set is final (None = no target)."
+                                      if app_sl_ and app_tgt else
                                       "The Target is held by the app: a change REPLACES it (None = no target). "
                                       "AlgoDelta's original SL stays active too - whichever hits first exits."
                                       if app_tgt else
@@ -2481,9 +2514,9 @@ def orders_page():
                     guarded_sl_set(kind, rule, trade_tracker._f(r.get("entry")),
                                    lambda rl: engine.set_order_custom(rid, kind, rl))
                 return on_set
-            cur_rule = (lambda k: json.dumps(engine.order_rule(r, k)) if engine.order_rule(r, k) else "") if lim \
+            cur_rule = (lambda k: json.dumps(engine.order_rule(r, k)) if engine.order_rule(r, k) else "") if lim or app_sl_ \
                 else (lambda k: r.get("c_" + k))
-            rule_toggle("SL", "sl", cur_rule("sl"), "none" if lim else f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}",
+            rule_toggle("SL", "sl", cur_rule("sl"), "none" if lim or app_sl_ else f"Common {cfg.get('sl', '')} {cfg.get('sl_type', '')}",
                         False, setter("sl"))
             rule_toggle("Target", "tgt", cur_rule("tgt"), "none" if lim or app_tgt else "Common (as sent)", False,
                         setter("tgt"), allow_none=lim or app_tgt)
@@ -2495,7 +2528,7 @@ def orders_page():
                     else {**engine.setup_trail(r["index"]), "on": True}
                 trail_dialog(r["index"], {}, cur=cur, on_save=lambda tr: engine.set_order_trail(rid, tr),
                              note="Watched by the app on the live LTP. This replaces the order's trailing SL "
-                                  "(AlgoDelta holds none for a limit / stop-limit order)." if lim else
+                                  "(AlgoDelta holds none for this order)." if lim or app_sl_ else
                                   "Watched by the app on the live LTP for this order. AlgoDelta's own trail (if sent) "
                                   "stays too - whichever hits first exits.")
             with ui.row().classes("items-center gap-2"):
@@ -2521,9 +2554,12 @@ def orders_page():
     def render():
         for r in engine.order_log:
             app_tgt = engine.app_target(r)
+            app_sl_ = engine.app_sl(r)
             parts = [f"{'SL' if k == 'sl' else 'Tgt'} {exit_rules.describe(exit_rules.parse(r.get('c_' + k)))}"
-                     + (" (app)" if k == "tgt" and app_tgt else "")
+                     + (" (app)" if (k == "tgt" and app_tgt) or (k == "sl" and app_sl_) else "")
                      for k in ("sl", "tgt") if exit_rules.parse(r.get("c_" + k))]
+            if app_sl_ and not engine.order_rule(r, "sl") and not engine.app_trail(r):
+                parts.insert(0, "NO SL (app)")
             if app_tgt and not engine.order_rule(r, "tgt"):
                 parts.append("Tgt none (app)")
             m = limit_orders.parse(r.get("mg"))
